@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertTriangle,
@@ -16,7 +16,6 @@ import {
   Download,
 } from "lucide-react";
 import { Button } from "./components/ui/button";
-import { Card, CardContent } from "./components/ui/card";
 
 const initialTree = {
   id: "top",
@@ -81,6 +80,7 @@ const initialTree = {
 const nodeTypeOptions = [
   { value: "TOP_EVENT", label: "Top event" },
   { value: "GATE", label: "Gate" },
+  { value: "INTERMEDIATE_EVENT", label: "Intermediate event" },
   { value: "BASIC_EVENT", label: "Basic event" },
   { value: "UNDEVELOPED_EVENT", label: "Undeveloped event" },
   { value: "TRANSFER_EVENT", label: "Transfer event" },
@@ -93,9 +93,12 @@ const gateTypeOptions = [
   { value: "XOR", label: "Exclusive OR" },
 ];
 
+const FTA_STANDARD_LABEL = "EIA 61025:2017";
+
 const typeLabels = {
   TOP_EVENT: "Top event",
   GATE: "Gate",
+  INTERMEDIATE_EVENT: "Intermediate event",
   BASIC_EVENT: "Basic event",
   UNDEVELOPED_EVENT: "Undeveloped event",
   TRANSFER_EVENT: "Transfer event",
@@ -112,13 +115,15 @@ const IEC_61025_RULES = {
   canHaveChildren: {
     TOP_EVENT: true,
     GATE: true,
+    INTERMEDIATE_EVENT: true,
     BASIC_EVENT: false,
     UNDEVELOPED_EVENT: false,
     TRANSFER_EVENT: false,
   },
   allowedChildTypes: {
     TOP_EVENT: ["GATE"],
-    GATE: ["GATE", "BASIC_EVENT", "UNDEVELOPED_EVENT", "TRANSFER_EVENT"],
+    GATE: ["GATE", "INTERMEDIATE_EVENT", "BASIC_EVENT", "UNDEVELOPED_EVENT", "TRANSFER_EVENT"],
+    INTERMEDIATE_EVENT: ["GATE"],
   },
 };
 
@@ -130,13 +135,17 @@ function getAllowedChildTypes(parentType) {
   return IEC_61025_RULES.allowedChildTypes[parentType] || [];
 }
 
+function formatRuleMessage(message) {
+  return `${message} (${FTA_STANDARD_LABEL})`;
+}
+
 function validateAddChild(parentNode, childType) {
   if (!canHaveChildren(parentNode.type)) {
-    return { valid: false, error: `${typeLabels[parentNode.type]} nodes cannot have children (IEC 61025)` };
+    return { valid: false, error: formatRuleMessage(`${typeLabels[parentNode.type]} nodes cannot have children`) };
   }
   const allowed = getAllowedChildTypes(parentNode.type);
   if (!allowed.includes(childType)) {
-    return { valid: false, error: `${typeLabels[childType]} cannot be a child of ${typeLabels[parentNode.type]} (IEC 61025)` };
+    return { valid: false, error: formatRuleMessage(`${typeLabels[childType]} cannot be a child of ${typeLabels[parentNode.type]}`) };
   }
   return { valid: true };
 }
@@ -153,6 +162,15 @@ function findNode(node, id) {
   if (node.id === id) return node;
   for (const child of node.children) {
     const found = findNode(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findParentNode(node, id, parent = null) {
+  if (node.id === id) return parent;
+  for (const child of node.children) {
+    const found = findParentNode(child, id, node);
     if (found) return found;
   }
   return null;
@@ -176,6 +194,77 @@ function deleteNode(node, id) {
 
 function flattenCount(node) {
   return 1 + node.children.reduce((sum, child) => sum + flattenCount(child), 0);
+}
+
+function getNodePatch(draft) {
+  const patch = {
+    title: draft.title,
+    type: draft.type,
+    description: draft.description,
+    probability: draft.probability,
+  };
+  if (draft.type === "GATE") {
+    patch.gateType = draft.gateType || "AND";
+  } else {
+    patch.gateType = undefined;
+  }
+  return patch;
+}
+
+function validateNodeTypeChange(node, nextType, parentNode, isRoot) {
+  if (isRoot && nextType !== "TOP_EVENT") {
+    return { valid: false, error: formatRuleMessage("The root node must remain the top event") };
+  }
+
+  if (parentNode && !getAllowedChildTypes(parentNode.type).includes(nextType)) {
+    return {
+      valid: false,
+      error: formatRuleMessage(`${typeLabels[nextType]} cannot be a child of ${typeLabels[parentNode.type]}`),
+    };
+  }
+
+  if (!canHaveChildren(nextType) && node.children.length > 0) {
+    return {
+      valid: false,
+      error: formatRuleMessage(
+        `Cannot change to ${typeLabels[nextType]} because this node has ${node.children.length} child${node.children.length === 1 ? "" : "ren"}`,
+      ),
+    };
+  }
+
+  const allowedChildren = getAllowedChildTypes(nextType);
+  const invalidChild = node.children.find((child) => !allowedChildren.includes(child.type));
+  if (invalidChild) {
+    return {
+      valid: false,
+      error: formatRuleMessage(
+        `Cannot change to ${typeLabels[nextType]} because it already has a ${typeLabels[invalidChild.type]} child`,
+      ),
+    };
+  }
+
+  return { valid: true };
+}
+
+function collectRuleViolations(node, parentNode = null, isRoot = true, violations = []) {
+  if (isRoot && node.type !== "TOP_EVENT") {
+    violations.push(formatRuleMessage("The root node must remain the top event"));
+  }
+
+  if (parentNode && !getAllowedChildTypes(parentNode.type).includes(node.type)) {
+    violations.push(formatRuleMessage(`${typeLabels[node.type]} cannot be a child of ${typeLabels[parentNode.type]}`));
+  }
+
+  if (!canHaveChildren(node.type) && node.children.length > 0) {
+    violations.push(formatRuleMessage(`${typeLabels[node.type]} nodes cannot have children`));
+  }
+
+  node.children.forEach((child) => collectRuleViolations(child, node, false, violations));
+  return violations;
+}
+
+function getFirstRuleViolation(tree) {
+  return collectRuleViolations(tree)[0] || "";
 }
 
 const DB_NAME = "minifta";
@@ -242,6 +331,10 @@ function isValidNode(node) {
     return false;
   }
 
+  if (!nodeTypeOptions.some((option) => option.value === node.type)) {
+    return false;
+  }
+
   if (node.type === "GATE") {
     return typeof node.gateType === "string" && gateTypeOptions.some((option) => option.value === node.gateType);
   }
@@ -278,6 +371,9 @@ function GateBadge({ node }) {
   if (node.type === "GATE") {
     return <div className={`${common} bg-indigo-100 text-indigo-700`}>{node.gateType}</div>;
   }
+  if (node.type === "INTERMEDIATE_EVENT") {
+    return <div className={`${common} bg-teal-100 text-teal-700`}>IE</div>;
+  }
   if (node.type === "UNDEVELOPED_EVENT") {
     return <div className={`${common} bg-amber-100 text-amber-700`}><AlertTriangle className="h-4 w-4" /></div>;
   }
@@ -285,6 +381,40 @@ function GateBadge({ node }) {
     return <div className={`${common} bg-sky-100 text-sky-700`}><ArrowRight className="h-4 w-4" /></div>;
   }
   return <div className={`${common} bg-slate-100 text-slate-700`}><Circle className="h-4 w-4" /></div>;
+}
+
+function RuleFeedback({ feedback, onDismiss }) {
+  return (
+    <AnimatePresence>
+      {feedback && (
+        <motion.div
+          key={feedback.id}
+          role="alert"
+          aria-live="assertive"
+          className="fixed left-4 right-4 top-20 z-[70] mx-auto flex max-w-3xl items-start gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-red-950 shadow-2xl"
+          initial={{ opacity: 0, y: -12, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -12, scale: 0.98 }}
+          transition={{ duration: 0.18 }}
+        >
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-red-100 text-red-700">
+            <AlertTriangle className="h-4 w-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold">FTA rule blocked</p>
+            <p className="text-sm leading-snug text-red-800">{feedback.message}</p>
+          </div>
+          <button
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-red-700 transition hover:bg-red-100"
+            onClick={onDismiss}
+            aria-label="Dismiss rule feedback"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
 }
 
 function TreeNode({ node, depth, selectedId, onSelect, onToggle }) {
@@ -345,15 +475,14 @@ function TreeNode({ node, depth, selectedId, onSelect, onToggle }) {
   );
 }
 
-function BottomDrawer({ selected, rootId, onClose, onSave, onAddChild, onDelete }) {
+function BottomDrawer({ selected, rootId, parentNode, onClose, onSave, onAddChild, onDelete, onRuleViolation }) {
   const [draft, setDraft] = useState(selected);
   const [validationError, setValidationError] = useState("");
 
-  React.useEffect(() => setDraft(selected), [selected]);
   if (!selected || !draft) return null;
 
-const canHaveGate = draft.type === "GATE";
-const canAddChildren = canHaveChildren(draft.type);
+  const canHaveGate = draft.type === "GATE";
+  const canAddChildren = canHaveChildren(draft.type);
 
   return (
     <AnimatePresence>
@@ -399,9 +528,11 @@ const canAddChildren = canHaveChildren(draft.type);
                 onChange={(e) => {
                   const type = e.target.value;
                   const nextDraft = { ...draft, type };
+                  const ruleCheck = validateNodeTypeChange(draft, type, parentNode, selected.id === rootId);
                   
-                  if (!canHaveChildren(type) && draft.children && draft.children.length > 0) {
-                    setValidationError(`Cannot change to ${typeLabels[type]}: node has ${draft.children.length} child(ren) (IEC 61025:2017)`);
+                  if (!ruleCheck.valid) {
+                    setValidationError(ruleCheck.error);
+                    onRuleViolation(ruleCheck.error);
                     return;
                   }
                   
@@ -458,22 +589,37 @@ const canAddChildren = canHaveChildren(draft.type);
         <div className="mt-5 grid grid-cols-2 gap-3">
           <Button 
             className="rounded-2xl" 
-            disabled={!canAddChildren}
+            variant={canAddChildren ? "default" : "outline"}
             onClick={() => {
+              const result = onAddChild(selected.id, draft);
+              if (result && !result.valid) {
+                setValidationError(result.error);
+                return;
+              }
               setValidationError("");
-              onAddChild(selected.id);
             }}
           >
             <Plus className="mr-2 h-4 w-4" /> Add child
           </Button>
-          <Button className="rounded-2xl" variant="outline" onClick={() => onSave(draft)}>
+          <Button
+            className="rounded-2xl"
+            variant="outline"
+            onClick={() => {
+              const result = onSave(draft);
+              if (result && !result.valid) {
+                setValidationError(result.error);
+                return;
+              }
+              setValidationError("");
+            }}
+          >
             <Save className="mr-2 h-4 w-4" /> Save
           </Button>
         </div>
 
         {!canAddChildren && (
           <p className="mt-3 text-xs text-amber-600">
-            {typeLabels[draft.type]} nodes cannot have children per IEC 61025:2017
+            {typeLabels[draft.type]} nodes cannot have children per {FTA_STANDARD_LABEL}.
           </p>
         )}
 
@@ -499,10 +645,16 @@ export default function FTAMobilePrototype() {
   const [selectedId, setSelectedId] = useState(null);
   const [storageStatus, setStorageStatus] = useState("loading");
   const [importError, setImportError] = useState("");
+  const [ruleFeedback, setRuleFeedback] = useState(null);
   const [dbReady, setDbReady] = useState(false);
   const fileInputRef = useRef(null);
   const selected = selectedId ? findNode(tree, selectedId) : null;
+  const selectedParent = selectedId ? findParentNode(tree, selectedId) : null;
   const nodeCount = useMemo(() => flattenCount(tree), [tree]);
+
+  const showRuleFeedback = (message) => {
+    setRuleFeedback({ id: uid(), message });
+  };
 
   useEffect(() => {
     let canceled = false;
@@ -511,8 +663,13 @@ export default function FTAMobilePrototype() {
       .then((stored) => {
         if (canceled) return;
         if (stored && isValidTree(stored)) {
-          setTree(normalizeTree(stored));
-          setStorageStatus("loaded");
+          const normalized = normalizeTree(stored);
+          if (!getFirstRuleViolation(normalized)) {
+            setTree(normalized);
+            setStorageStatus("loaded");
+          } else {
+            setStorageStatus("initialized");
+          }
         } else {
           setStorageStatus("initialized");
         }
@@ -532,6 +689,13 @@ export default function FTAMobilePrototype() {
   }, []);
 
   useEffect(() => {
+    if (!ruleFeedback) return undefined;
+
+    const timeout = window.setTimeout(() => setRuleFeedback(null), 5200);
+    return () => window.clearTimeout(timeout);
+  }, [ruleFeedback]);
+
+  useEffect(() => {
     if (!dbReady || storageStatus === "unsupported") return;
 
     saveTreeToDb(tree)
@@ -548,33 +712,41 @@ export default function FTAMobilePrototype() {
   };
 
   const saveNode = (draft) => {
-    const patch = {
-      title: draft.title,
-      type: draft.type,
-      description: draft.description,
-      probability: draft.probability,
-    };
-    if (draft.type === "GATE") {
-      patch.gateType = draft.gateType || "AND";
+    const currentNode = findNode(tree, draft.id);
+    const parentNode = findParentNode(tree, draft.id);
+    const ruleCheck = validateNodeTypeChange(currentNode || draft, draft.type, parentNode, draft.id === tree.id);
+    if (!ruleCheck.valid) {
+      showRuleFeedback(ruleCheck.error);
+      return ruleCheck;
     }
-    setTree(updateNode(tree, draft.id, patch));
+
+    setTree(updateNode(tree, draft.id, getNodePatch(draft)));
+    return { valid: true };
   };
 
-  const addNewChild = (parentId) => {
-    const parentNode = findNode(tree, parentId);
-    if (!parentNode) return;
-
-    if (!canHaveChildren(parentNode.type)) {
-      alert(`${typeLabels[parentNode.type]} nodes cannot have children (IEC 61025:2017)`);
-      return;
+  const addNewChild = (parentId, parentDraft = null) => {
+    const savedParentNode = findNode(tree, parentId);
+    if (!savedParentNode) return { valid: false, error: "Parent node was not found." };
+    const parentNode = parentDraft || savedParentNode;
+    const parentOfParent = findParentNode(tree, parentId);
+    const parentRuleCheck = validateNodeTypeChange(savedParentNode, parentNode.type, parentOfParent, parentId === tree.id);
+    if (!parentRuleCheck.valid) {
+      showRuleFeedback(parentRuleCheck.error);
+      return parentRuleCheck;
     }
 
     let childType = "BASIC_EVENT";
     let childTitle = "New basic event";
 
-    if (parentNode.type === "TOP_EVENT") {
+    if (parentNode.type === "TOP_EVENT" || parentNode.type === "INTERMEDIATE_EVENT") {
       childType = "GATE";
       childTitle = "New gate";
+    }
+
+    const ruleCheck = validateAddChild(parentNode, childType);
+    if (!ruleCheck.valid) {
+      showRuleFeedback(ruleCheck.error);
+      return ruleCheck;
     }
 
     const child = {
@@ -591,8 +763,10 @@ export default function FTAMobilePrototype() {
       child.gateType = "AND";
     }
 
-    setTree(addChild(tree, parentId, child));
+    const nextTree = parentDraft ? updateNode(tree, parentId, getNodePatch(parentDraft)) : tree;
+    setTree(addChild(nextTree, parentId, child));
     setSelectedId(child.id);
+    return { valid: true };
   };
 
   const removeNode = (id) => {
@@ -616,13 +790,24 @@ export default function FTAMobilePrototype() {
         if (!isValidTree(parsed)) {
           throw new Error("Invalid FTA structure");
         }
-        setTree(normalizeTree(parsed));
+        const normalized = normalizeTree(parsed);
+        const ruleViolation = getFirstRuleViolation(normalized);
+        if (ruleViolation) {
+          throw new Error(ruleViolation);
+        }
+        setTree(normalized);
         setSelectedId(null);
         setImportError("");
         alert("FTA tree imported successfully.");
       } catch (error) {
         console.warn("Import failed", error);
-        setImportError("Invalid JSON file. Please select a valid FTA export.");
+        const message = error.message?.includes(FTA_STANDARD_LABEL)
+          ? error.message
+          : "Invalid JSON file. Please select a valid FTA export.";
+        setImportError(message);
+        if (message.includes(FTA_STANDARD_LABEL)) {
+          showRuleFeedback(message);
+        }
       }
       event.target.value = "";
     };
@@ -660,10 +845,11 @@ export default function FTAMobilePrototype() {
       <div className="mx-auto flex min-h-screen w-screen flex-col">
         <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 px-4 py-2 backdrop-blur">
           <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">Fault Tree Analysis</p>
-          <p className="text-xs text-slate-500">{statusLabel}</p>
+          <p className="text-xs text-slate-500">{statusLabel} · {nodeCount} nodes</p>
           {importError && <p className="text-xs text-red-600">{importError}</p>}
         </header>
-        <div className="mx-auto flex w-full max-w-3xl flex-col flex-1 px-4 py-6">
+        <RuleFeedback feedback={ruleFeedback} onDismiss={() => setRuleFeedback(null)} />
+        <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pb-24 pt-6">
 
         <main className="flex-1 space-y-4 px-0 py-4">
           <TreeNode node={tree} depth={0} selectedId={selectedId} onSelect={setSelectedId} onToggle={toggleNode} />
@@ -676,18 +862,18 @@ export default function FTAMobilePrototype() {
           className="hidden"
           onChange={handleImportFile}
         />
-        <nav className="border-t border-slate-200 bg-white/95 p-4">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
-            <Button className="rounded-[1.5rem]" variant="outline" onClick={() => setTree(cloneTree(initialTree))}>
+        <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-200 bg-white/95 px-3 py-2 backdrop-blur">
+          <div className="mx-auto grid max-w-3xl grid-cols-4 gap-2">
+            <Button className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm" variant="ghost" onClick={() => setTree(cloneTree(initialTree))}>
               <Upload className="mr-2 h-4 w-4" /> Demo
             </Button>
-            <Button className="rounded-[1.5rem]" variant="outline" onClick={importJson}>
+            <Button className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm" variant="ghost" onClick={importJson}>
               <Upload className="mr-2 h-4 w-4 rotate-180 transform" /> Import
             </Button>
-            <Button className="rounded-[1.5rem]" variant="outline" onClick={exportJson}>
+            <Button className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm" variant="ghost" onClick={exportJson}>
               <Download className="mr-2 h-4 w-4" /> Export
             </Button>
-            <Button className="rounded-[1.5rem]" onClick={() => setSelectedId(tree.id)}>
+            <Button className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm" variant="ghost" onClick={() => setSelectedId(tree.id)}>
               Edit top
             </Button>
           </div>
@@ -697,12 +883,15 @@ export default function FTAMobilePrototype() {
 
       {selected && (
         <BottomDrawer
+          key={selected.id}
           selected={selected}
           rootId={tree.id}
+          parentNode={selectedParent}
           onClose={() => setSelectedId(null)}
           onSave={saveNode}
           onAddChild={addNewChild}
           onDelete={removeNode}
+          onRuleViolation={showRuleFeedback}
         />
       )}
     </div>
