@@ -1,7 +1,8 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertTriangle,
+  ArrowRight,
   Circle,
   ChevronDown,
   ChevronRight,
@@ -19,8 +20,7 @@ import { Card, CardContent } from "./components/ui/card";
 
 const initialTree = {
   id: "top",
-  type: "TOP",
-  gate: "OR",
+  type: "TOP_EVENT",
   title: "Loss of beam permit",
   description: "Top event for the fault tree analysis.",
   probability: "",
@@ -29,7 +29,7 @@ const initialTree = {
     {
       id: "n1",
       type: "GATE",
-      gate: "AND",
+      gateType: "AND",
       title: "Erroneous machine state accepted",
       description: "Control system accepts an unsafe combination of conditions.",
       probability: "",
@@ -37,8 +37,7 @@ const initialTree = {
       children: [
         {
           id: "n1-1",
-          type: "BASIC",
-          gate: null,
+          type: "BASIC_EVENT",
           title: "Sensor reports stale value",
           description: "Input value is not refreshed within required time window.",
           probability: "2e-4",
@@ -47,8 +46,7 @@ const initialTree = {
         },
         {
           id: "n1-2",
-          type: "BASIC",
-          gate: null,
+          type: "UNDEVELOPED_EVENT",
           title: "Interlock logic mismatch",
           description: "Requirement interpretation differs between design and implementation.",
           probability: "8e-5",
@@ -60,7 +58,7 @@ const initialTree = {
     {
       id: "n2",
       type: "GATE",
-      gate: "OR",
+      gateType: "OR",
       title: "Actuator does not respond",
       description: "Command is issued but the physical mitigation chain fails.",
       probability: "",
@@ -68,10 +66,9 @@ const initialTree = {
       children: [
         {
           id: "n2-1",
-          type: "BASIC",
-          gate: null,
-          title: "Power supply unavailable",
-          description: "Local power supply unavailable at demand time.",
+          type: "TRANSFER_EVENT",
+          title: "External power transfer failure",
+          description: "Fault chain enters a separate analysis boundary.",
           probability: "1e-4",
           expanded: true,
           children: [],
@@ -81,8 +78,68 @@ const initialTree = {
   ],
 };
 
-const typeOptions = ["TOP", "GATE", "BASIC", "UNDEVELOPED"];
-const gateOptions = ["OR", "AND", "VOTE", "INHIBIT"];
+const nodeTypeOptions = [
+  { value: "TOP_EVENT", label: "Top event" },
+  { value: "GATE", label: "Gate" },
+  { value: "BASIC_EVENT", label: "Basic event" },
+  { value: "UNDEVELOPED_EVENT", label: "Undeveloped event" },
+  { value: "TRANSFER_EVENT", label: "Transfer event" },
+];
+const gateTypeOptions = [
+  { value: "AND", label: "AND" },
+  { value: "OR", label: "OR" },
+  { value: "INHIBIT", label: "Inhibit" },
+  { value: "K_OUT_OF_N", label: "K/N" },
+  { value: "XOR", label: "Exclusive OR" },
+];
+
+const typeLabels = {
+  TOP_EVENT: "Top event",
+  GATE: "Gate",
+  BASIC_EVENT: "Basic event",
+  UNDEVELOPED_EVENT: "Undeveloped event",
+  TRANSFER_EVENT: "Transfer event",
+};
+const gateTypeLabels = {
+  AND: "AND",
+  OR: "OR",
+  INHIBIT: "Inhibit",
+  K_OUT_OF_N: "K/N",
+  XOR: "Exclusive OR",
+};
+
+const IEC_61025_RULES = {
+  canHaveChildren: {
+    TOP_EVENT: true,
+    GATE: true,
+    BASIC_EVENT: false,
+    UNDEVELOPED_EVENT: false,
+    TRANSFER_EVENT: false,
+  },
+  allowedChildTypes: {
+    TOP_EVENT: ["GATE"],
+    GATE: ["GATE", "BASIC_EVENT", "UNDEVELOPED_EVENT", "TRANSFER_EVENT"],
+  },
+};
+
+function canHaveChildren(nodeType) {
+  return IEC_61025_RULES.canHaveChildren[nodeType] || false;
+}
+
+function getAllowedChildTypes(parentType) {
+  return IEC_61025_RULES.allowedChildTypes[parentType] || [];
+}
+
+function validateAddChild(parentNode, childType) {
+  if (!canHaveChildren(parentNode.type)) {
+    return { valid: false, error: `${typeLabels[parentNode.type]} nodes cannot have children (IEC 61025)` };
+  }
+  const allowed = getAllowedChildTypes(parentNode.type);
+  if (!allowed.includes(childType)) {
+    return { valid: false, error: `${typeLabels[childType]} cannot be a child of ${typeLabels[parentNode.type]} (IEC 61025)` };
+  }
+  return { valid: true };
+}
 
 function uid() {
   return `n-${Math.random().toString(36).slice(2, 9)}`;
@@ -121,16 +178,111 @@ function flattenCount(node) {
   return 1 + node.children.reduce((sum, child) => sum + flattenCount(child), 0);
 }
 
+const DB_NAME = "minifta";
+const STORE_NAME = "fta-trees";
+const DB_VERSION = 1;
+const TREE_KEY = "current-tree";
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error("IndexedDB not supported"));
+      return;
+    }
+
+    const request = window.indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function getTreeFromDb() {
+  return openDb().then((db) => {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.get(TREE_KEY);
+      request.onsuccess = () => resolve(request.result ?? null);
+      request.onerror = () => reject(request.error);
+    });
+  });
+}
+
+function saveTreeToDb(tree) {
+  return openDb().then((db) => {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.put(tree, TREE_KEY);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  });
+}
+
+function isValidNode(node) {
+  if (
+    !node ||
+    typeof node !== "object" ||
+    typeof node.id !== "string" ||
+    typeof node.type !== "string" ||
+    typeof node.title !== "string" ||
+    typeof node.description !== "string" ||
+    typeof node.probability !== "string" ||
+    typeof node.expanded !== "boolean" ||
+    !Array.isArray(node.children) ||
+    !node.children.every(isValidNode)
+  ) {
+    return false;
+  }
+
+  if (node.type === "GATE") {
+    return typeof node.gateType === "string" && gateTypeOptions.some((option) => option.value === node.gateType);
+  }
+
+  return !Object.prototype.hasOwnProperty.call(node, "gateType") || node.gateType === undefined;
+}
+
+function isValidTree(tree) {
+  return isValidNode(tree);
+}
+
+function normalizeTree(node) {
+  const normalized = {
+    ...node,
+    expanded: node.expanded !== undefined ? node.expanded : true,
+    children: Array.isArray(node.children) ? node.children.map(normalizeTree) : [],
+  };
+
+  if (normalized.type === "GATE") {
+    normalized.gateType = normalized.gateType || normalized.gate || "AND";
+  } else {
+    delete normalized.gateType;
+  }
+  delete normalized.gate;
+
+  return normalized;
+}
+
 function GateBadge({ node }) {
   const common = "h-8 w-8 shrink-0 rounded-xl flex items-center justify-center text-xs font-bold shadow-sm";
-  if (node.type === "TOP") {
+  if (node.type === "TOP_EVENT") {
     return <div className={`${common} bg-red-100 text-red-700`}><ShieldAlert className="h-4 w-4" /></div>;
   }
   if (node.type === "GATE") {
-    return <div className={`${common} bg-indigo-100 text-indigo-700`}>{node.gate}</div>;
+    return <div className={`${common} bg-indigo-100 text-indigo-700`}>{node.gateType}</div>;
   }
-  if (node.type === "UNDEVELOPED") {
+  if (node.type === "UNDEVELOPED_EVENT") {
     return <div className={`${common} bg-amber-100 text-amber-700`}><AlertTriangle className="h-4 w-4" /></div>;
+  }
+  if (node.type === "TRANSFER_EVENT") {
+    return <div className={`${common} bg-sky-100 text-sky-700`}><ArrowRight className="h-4 w-4" /></div>;
   }
   return <div className={`${common} bg-slate-100 text-slate-700`}><Circle className="h-4 w-4" /></div>;
 }
@@ -163,7 +315,7 @@ function TreeNode({ node, depth, selectedId, onSelect, onToggle }) {
               <p className="truncate text-sm font-semibold text-slate-900">{node.title || "Untitled node"}</p>
             </div>
             <p className="truncate text-xs text-slate-500">
-              {node.type}{node.gate ? ` · ${node.gate} gate` : ""}{node.probability ? ` · P=${node.probability}` : ""}
+              {typeLabels[node.type] || node.type}{node.type === "GATE" ? ` · ${gateTypeLabels[node.gateType] || node.gateType} gate` : ""}{node.probability ? ` · P=${node.probability}` : ""}
             </p>
           </div>
         </button>
@@ -195,11 +347,13 @@ function TreeNode({ node, depth, selectedId, onSelect, onToggle }) {
 
 function BottomDrawer({ selected, rootId, onClose, onSave, onAddChild, onDelete }) {
   const [draft, setDraft] = useState(selected);
+  const [validationError, setValidationError] = useState("");
 
   React.useEffect(() => setDraft(selected), [selected]);
   if (!selected || !draft) return null;
 
-  const canHaveGate = draft.type === "TOP" || draft.type === "GATE";
+const canHaveGate = draft.type === "GATE";
+const canAddChildren = canHaveChildren(draft.type);
 
   return (
     <AnimatePresence>
@@ -244,22 +398,39 @@ function BottomDrawer({ selected, rootId, onClose, onSave, onAddChild, onDelete 
                 value={draft.type}
                 onChange={(e) => {
                   const type = e.target.value;
-                  setDraft({ ...draft, type, gate: type === "GATE" || type === "TOP" ? draft.gate || "OR" : null });
+                  const nextDraft = { ...draft, type };
+                  
+                  if (!canHaveChildren(type) && draft.children && draft.children.length > 0) {
+                    setValidationError(`Cannot change to ${typeLabels[type]}: node has ${draft.children.length} child(ren) (IEC 61025:2017)`);
+                    return;
+                  }
+                  
+                  setValidationError("");
+                  if (type === "GATE") {
+                    nextDraft.gateType = draft.gateType || "AND";
+                  } else {
+                    delete nextDraft.gateType;
+                  }
+                  setDraft(nextDraft);
                 }}
               >
-                {typeOptions.map((option) => <option key={option}>{option}</option>)}
+                {nodeTypeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
               </select>
             </label>
 
             <label className="grid gap-1 text-sm font-medium text-slate-700">
-              Gate
+              Gate type
               <select
                 className="rounded-xl border border-slate-200 px-3 py-2 text-base outline-none disabled:bg-slate-50 disabled:text-slate-400"
-                value={draft.gate || ""}
+                value={draft.gateType || ""}
                 disabled={!canHaveGate}
-                onChange={(e) => setDraft({ ...draft, gate: e.target.value })}
+                onChange={(e) => setDraft({ ...draft, gateType: e.target.value })}
               >
-                {gateOptions.map((option) => <option key={option}>{option}</option>)}
+                {gateTypeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
               </select>
             </label>
           </div>
@@ -285,13 +456,30 @@ function BottomDrawer({ selected, rootId, onClose, onSave, onAddChild, onDelete 
         </div>
 
         <div className="mt-5 grid grid-cols-2 gap-3">
-          <Button className="rounded-2xl" onClick={() => onAddChild(selected.id)}>
+          <Button 
+            className="rounded-2xl" 
+            disabled={!canAddChildren}
+            onClick={() => {
+              setValidationError("");
+              onAddChild(selected.id);
+            }}
+          >
             <Plus className="mr-2 h-4 w-4" /> Add child
           </Button>
           <Button className="rounded-2xl" variant="outline" onClick={() => onSave(draft)}>
             <Save className="mr-2 h-4 w-4" /> Save
           </Button>
         </div>
+
+        {!canAddChildren && (
+          <p className="mt-3 text-xs text-amber-600">
+            {typeLabels[draft.type]} nodes cannot have children per IEC 61025:2017
+          </p>
+        )}
+
+        {validationError && (
+          <p className="mt-3 text-xs text-red-600">{validationError}</p>
+        )}
 
         <Button
           className="mt-3 w-full rounded-2xl"
@@ -309,8 +497,50 @@ function BottomDrawer({ selected, rootId, onClose, onSave, onAddChild, onDelete 
 export default function FTAMobilePrototype() {
   const [tree, setTree] = useState(initialTree);
   const [selectedId, setSelectedId] = useState(null);
+  const [storageStatus, setStorageStatus] = useState("loading");
+  const [importError, setImportError] = useState("");
+  const [dbReady, setDbReady] = useState(false);
+  const fileInputRef = useRef(null);
   const selected = selectedId ? findNode(tree, selectedId) : null;
   const nodeCount = useMemo(() => flattenCount(tree), [tree]);
+
+  useEffect(() => {
+    let canceled = false;
+
+    getTreeFromDb()
+      .then((stored) => {
+        if (canceled) return;
+        if (stored && isValidTree(stored)) {
+          setTree(normalizeTree(stored));
+          setStorageStatus("loaded");
+        } else {
+          setStorageStatus("initialized");
+        }
+      })
+      .catch((error) => {
+        if (canceled) return;
+        console.warn("IndexedDB load failed", error);
+        setStorageStatus("unsupported");
+      })
+      .finally(() => {
+        if (!canceled) setDbReady(true);
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!dbReady || storageStatus === "unsupported") return;
+
+    saveTreeToDb(tree)
+      .then(() => setStorageStatus("saved"))
+      .catch((error) => {
+        console.warn("IndexedDB save failed", error);
+        setStorageStatus("unsupported");
+      });
+  }, [tree, dbReady, storageStatus]);
 
   const toggleNode = (id) => {
     const node = findNode(tree, id);
@@ -318,26 +548,49 @@ export default function FTAMobilePrototype() {
   };
 
   const saveNode = (draft) => {
-    setTree(updateNode(tree, draft.id, {
+    const patch = {
       title: draft.title,
       type: draft.type,
-      gate: draft.type === "TOP" || draft.type === "GATE" ? draft.gate || "OR" : null,
       description: draft.description,
       probability: draft.probability,
-    }));
+    };
+    if (draft.type === "GATE") {
+      patch.gateType = draft.gateType || "AND";
+    }
+    setTree(updateNode(tree, draft.id, patch));
   };
 
   const addNewChild = (parentId) => {
+    const parentNode = findNode(tree, parentId);
+    if (!parentNode) return;
+
+    if (!canHaveChildren(parentNode.type)) {
+      alert(`${typeLabels[parentNode.type]} nodes cannot have children (IEC 61025:2017)`);
+      return;
+    }
+
+    let childType = "BASIC_EVENT";
+    let childTitle = "New basic event";
+
+    if (parentNode.type === "TOP_EVENT") {
+      childType = "GATE";
+      childTitle = "New gate";
+    }
+
     const child = {
       id: uid(),
-      type: "BASIC",
-      gate: null,
-      title: "New basic event",
-      description: "Describe the failure mode or causal event.",
+      type: childType,
+      title: childTitle,
+      description: childType === "GATE" ? "Combines input events" : "Describe the failure mode or causal event.",
       probability: "",
       expanded: true,
       children: [],
     };
+
+    if (childType === "GATE") {
+      child.gateType = "AND";
+    }
+
     setTree(addChild(tree, parentId, child));
     setSelectedId(child.id);
   };
@@ -347,57 +600,99 @@ export default function FTAMobilePrototype() {
     setSelectedId(null);
   };
 
-  const exportJson = () => {
-    const payload = JSON.stringify(tree, null, 2);
-    navigator.clipboard?.writeText(payload);
-    alert("FTA JSON copied to clipboard.");
+  const importJson = () => {
+    setImportError("");
+    fileInputRef.current?.click();
   };
 
+  const handleImportFile = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!isValidTree(parsed)) {
+          throw new Error("Invalid FTA structure");
+        }
+        setTree(normalizeTree(parsed));
+        setSelectedId(null);
+        setImportError("");
+        alert("FTA tree imported successfully.");
+      } catch (error) {
+        console.warn("Import failed", error);
+        setImportError("Invalid JSON file. Please select a valid FTA export.");
+      }
+      event.target.value = "";
+    };
+    reader.onerror = () => {
+      setImportError("Unable to read the JSON file. Please try again.");
+      event.target.value = "";
+    };
+    reader.readAsText(file);
+  };
+
+  const exportJson = () => {
+    const payload = JSON.stringify(tree, null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "fta-tree.json";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const statusLabel =
+    storageStatus === "loading"
+      ? "Loading tree from browser storage..."
+      : storageStatus === "unsupported"
+      ? "Browser persistence unavailable. Data is still editable for this session."
+      : storageStatus === "loaded"
+      ? "Tree loaded from browser storage. Changes auto-save locally."
+      : storageStatus === "initialized"
+      ? "No saved tree found. Using initial demo data."
+      : "Changes are auto-saved in browser storage.";
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-950">
-      <div className="mx-auto flex min-h-screen max-w-md flex-col">
-        <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">Fault Tree Analysis</p>
-              <h1 className="text-xl font-black tracking-tight">Mobile FTA Editor</h1>
-            </div>
-            <div className="rounded-2xl bg-slate-100 px-3 py-2 text-right">
-              <p className="text-xs text-slate-500">Nodes</p>
-              <p className="text-lg font-bold">{nodeCount}</p>
-            </div>
-          </div>
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_right,_rgba(79,70,229,0.16),_transparent_34%),linear-gradient(180deg,#f8fbff_0%,#eef2ff_100%)] text-slate-950">
+      <div className="mx-auto flex min-h-screen w-screen flex-col">
+        <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 px-4 py-2 backdrop-blur">
+          <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">Fault Tree Analysis</p>
+          <p className="text-xs text-slate-500">{statusLabel}</p>
+          {importError && <p className="text-xs text-red-600">{importError}</p>}
         </header>
+        <div className="mx-auto flex w-full max-w-3xl flex-col flex-1 px-4 py-6">
 
-        <main className="flex-1 px-4 py-4 pb-28">
-          <Card className="mb-4 rounded-3xl border-slate-200 shadow-sm">
-            <CardContent className="p-4">
-              <div className="flex gap-3">
-                <div className="rounded-2xl bg-indigo-100 p-3 text-indigo-700"><GitBranch className="h-5 w-5" /></div>
-                <div>
-                  <h2 className="font-bold">Nested-list notation</h2>
-                  <p className="text-sm text-slate-600">Tap any node to edit details. Gates become compact badges rather than diagram symbols, which is more usable on a phone.</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
+        <main className="flex-1 space-y-4 px-0 py-4">
           <TreeNode node={tree} depth={0} selectedId={selectedId} onSelect={setSelectedId} onToggle={toggleNode} />
         </main>
 
-        <nav className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-md border-t border-slate-200 bg-white/95 p-3 backdrop-blur">
-          <div className="grid grid-cols-3 gap-2">
-            <Button className="rounded-2xl" variant="outline" onClick={() => setTree(cloneTree(initialTree))}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          onChange={handleImportFile}
+        />
+        <nav className="border-t border-slate-200 bg-white/95 p-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+            <Button className="rounded-[1.5rem]" variant="outline" onClick={() => setTree(cloneTree(initialTree))}>
               <Upload className="mr-2 h-4 w-4" /> Demo
             </Button>
-            <Button className="rounded-2xl" variant="outline" onClick={exportJson}>
-              <Download className="mr-2 h-4 w-4" /> JSON
+            <Button className="rounded-[1.5rem]" variant="outline" onClick={importJson}>
+              <Upload className="mr-2 h-4 w-4 rotate-180 transform" /> Import
             </Button>
-            <Button className="rounded-2xl" onClick={() => setSelectedId(tree.id)}>
+            <Button className="rounded-[1.5rem]" variant="outline" onClick={exportJson}>
+              <Download className="mr-2 h-4 w-4" /> Export
+            </Button>
+            <Button className="rounded-[1.5rem]" onClick={() => setSelectedId(tree.id)}>
               Edit top
             </Button>
           </div>
         </nav>
+      </div>
       </div>
 
       {selected && (
