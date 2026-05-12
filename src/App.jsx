@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertTriangle,
   ArrowRight,
+  BarChart3,
   Circle,
   ChevronDown,
   ChevronRight,
@@ -11,9 +12,11 @@ import {
   X,
   Save,
   GitBranch,
+  GripVertical,
   ShieldAlert,
   Upload,
   Download,
+  GitFork,
 } from "lucide-react";
 import { Button } from "./components/ui/button";
 
@@ -111,6 +114,8 @@ const gateTypeLabels = {
   XOR: "Exclusive OR",
 };
 
+const DRAG_NODE_MIME_TYPE = "application/x-minifta-node";
+
 const IEC_61025_RULES = {
   canHaveChildren: {
     TOP_EVENT: true,
@@ -192,6 +197,13 @@ function deleteNode(node, id) {
   return { ...node, children: node.children.filter((c) => c.id !== id).map((c) => deleteNode(c, id)) };
 }
 
+function moveNode(tree, movedId, targetParentId) {
+  const movedNode = findNode(tree, movedId);
+  if (!movedNode) return tree;
+
+  return addChild(deleteNode(tree, movedId), targetParentId, movedNode);
+}
+
 function flattenCount(node) {
   return 1 + node.children.reduce((sum, child) => sum + flattenCount(child), 0);
 }
@@ -246,6 +258,29 @@ function validateNodeTypeChange(node, nextType, parentNode, isRoot) {
   return { valid: true };
 }
 
+function validateMoveNode(tree, movedId, targetParentId) {
+  const movedNode = findNode(tree, movedId);
+  const targetParentNode = findNode(tree, targetParentId);
+
+  if (!movedNode || !targetParentNode) {
+    return { valid: false, error: "The dragged node or drop target was not found." };
+  }
+
+  if (movedId === tree.id) {
+    return { valid: false, error: formatRuleMessage("The top event cannot be moved") };
+  }
+
+  if (movedId === targetParentId) {
+    return { valid: false, error: formatRuleMessage("A node cannot be moved into itself") };
+  }
+
+  if (findNode(movedNode, targetParentId)) {
+    return { valid: false, error: formatRuleMessage("A node cannot be moved into its own child branch") };
+  }
+
+  return validateAddChild(targetParentNode, movedNode.type);
+}
+
 function collectRuleViolations(node, parentNode = null, isRoot = true, violations = []) {
   if (isRoot && node.type !== "TOP_EVENT") {
     violations.push(formatRuleMessage("The root node must remain the top event"));
@@ -265,6 +300,133 @@ function collectRuleViolations(node, parentNode = null, isRoot = true, violation
 
 function getFirstRuleViolation(tree) {
   return collectRuleViolations(tree)[0] || "";
+}
+
+function parseProbability(value) {
+  if (!value.trim()) return null;
+
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return null;
+  return parsed;
+}
+
+function formatProbability(value) {
+  if (value === null || value === undefined) return "Not available";
+  if (value === 0) return "0";
+  if (value < 0.001) return value.toExponential(3);
+  return value.toPrecision(4);
+}
+
+function combineProbability(gateType, inputs) {
+  if (!inputs.length) return null;
+
+  if (gateType === "AND" || gateType === "INHIBIT") {
+    return inputs.reduce((product, value) => product * value, 1);
+  }
+
+  if (gateType === "OR") {
+    return 1 - inputs.reduce((product, value) => product * (1 - value), 1);
+  }
+
+  if (gateType === "XOR") {
+    return inputs.reduce((sum, value, index) => {
+      const othersDoNotOccur = inputs.reduce((product, otherValue, otherIndex) => {
+        return otherIndex === index ? product : product * (1 - otherValue);
+      }, 1);
+      return sum + value * othersDoNotOccur;
+    }, 0);
+  }
+
+  return null;
+}
+
+function getNodeProbability(node, issues) {
+  if (node.type === "GATE") {
+    if (node.gateType === "K_OUT_OF_N") {
+      issues.push(`${node.title || "K/N gate"} needs a K threshold before probability can be calculated.`);
+      return null;
+    }
+
+    const inputs = node.children.map((child) => getNodeProbability(child, issues));
+    if (!inputs.length || inputs.some((value) => value === null)) {
+      issues.push(`${node.title || "Gate"} has missing or unsupported probability inputs.`);
+      return null;
+    }
+
+    return combineProbability(node.gateType, inputs);
+  }
+
+  if ((node.type === "TOP_EVENT" || node.type === "INTERMEDIATE_EVENT") && node.children.length > 0) {
+    const inputs = node.children.map((child) => getNodeProbability(child, issues));
+    if (inputs.some((value) => value === null)) {
+      issues.push(`${node.title || typeLabels[node.type]} has incomplete child probabilities.`);
+      return null;
+    }
+    if (inputs.length === 1) return inputs[0];
+    return combineProbability("OR", inputs);
+  }
+
+  const ownProbability = parseProbability(node.probability || "");
+  if (ownProbability === null) {
+    issues.push(`${node.title || typeLabels[node.type]} has no parseable probability.`);
+  }
+  return ownProbability;
+}
+
+function analyzeTree(tree) {
+  const countsByType = Object.fromEntries(nodeTypeOptions.map((option) => [option.value, 0]));
+  const countsByGate = Object.fromEntries(gateTypeOptions.map((option) => [option.value, 0]));
+  const leafTypes = new Set(["BASIC_EVENT", "UNDEVELOPED_EVENT", "TRANSFER_EVENT", "INTERMEDIATE_EVENT"]);
+  const issues = [];
+  const ruleViolations = collectRuleViolations(tree);
+  let totalNodes = 0;
+  let leafCount = 0;
+  let terminalEventCount = 0;
+  let terminalEventsWithProbability = 0;
+  let maxDepth = 0;
+  let maxChildren = 0;
+
+  function visit(node, depth) {
+    totalNodes += 1;
+    countsByType[node.type] = (countsByType[node.type] || 0) + 1;
+    maxDepth = Math.max(maxDepth, depth);
+    maxChildren = Math.max(maxChildren, node.children.length);
+
+    if (node.type === "GATE") {
+      countsByGate[node.gateType] = (countsByGate[node.gateType] || 0) + 1;
+    }
+
+    if (node.children.length === 0) {
+      leafCount += 1;
+      if (leafTypes.has(node.type)) {
+        terminalEventCount += 1;
+        if (parseProbability(node.probability || "") !== null) {
+          terminalEventsWithProbability += 1;
+        }
+      }
+    }
+
+    node.children.forEach((child) => visit(child, depth + 1));
+  }
+
+  visit(tree, 1);
+  const topProbability = getNodeProbability(tree, issues);
+  const uniqueIssues = [...new Set(issues)];
+
+  return {
+    countsByGate,
+    countsByType,
+    leafCount,
+    maxChildren,
+    maxDepth,
+    probabilityCoverage: terminalEventCount === 0 ? 0 : terminalEventsWithProbability / terminalEventCount,
+    probabilityIssues: uniqueIssues,
+    ruleViolations,
+    terminalEventCount,
+    terminalEventsWithProbability,
+    topProbability,
+    totalNodes,
+  };
 }
 
 const DB_NAME = "minifta";
@@ -417,38 +579,180 @@ function RuleFeedback({ feedback, onDismiss }) {
   );
 }
 
-function TreeNode({ node, depth, selectedId, onSelect, onToggle }) {
+function StatTile({ label, value, detail }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{label}</p>
+      <p className="mt-1 text-2xl font-bold text-slate-950">{value}</p>
+      {detail && <p className="mt-1 text-xs text-slate-500">{detail}</p>}
+    </div>
+  );
+}
+
+function AnalysisView({ tree }) {
+  const analysis = useMemo(() => analyzeTree(tree), [tree]);
+  const coveragePercent = Math.round(analysis.probabilityCoverage * 100);
+  const populatedTypeCounts = nodeTypeOptions.filter((option) => analysis.countsByType[option.value] > 0);
+  const populatedGateCounts = gateTypeOptions.filter((option) => analysis.countsByGate[option.value] > 0);
+
+  return (
+    <div className="space-y-4">
+      <section className="grid gap-3 sm:grid-cols-2">
+        <StatTile label="Top event estimate" value={formatProbability(analysis.topProbability)} detail="Independent-input approximation" />
+        <StatTile label="Probability coverage" value={`${coveragePercent}%`} detail={`${analysis.terminalEventsWithProbability}/${analysis.terminalEventCount} terminal events`} />
+        <StatTile label="Tree depth" value={analysis.maxDepth} detail={`${analysis.leafCount} leaf nodes`} />
+        <StatTile label="Largest fan-in" value={analysis.maxChildren} detail="Most direct children on one node" />
+      </section>
+
+      <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-3 flex items-center gap-2">
+          <GitFork className="h-4 w-4 text-slate-500" />
+          <h2 className="text-sm font-bold text-slate-950">Structure</h2>
+        </div>
+        <div className="grid gap-2">
+          {populatedTypeCounts.map((option) => {
+            const count = analysis.countsByType[option.value];
+            const width = `${Math.max(6, (count / analysis.totalNodes) * 100)}%`;
+            return (
+              <div key={option.value} className="grid gap-1">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium text-slate-700">{option.label}</span>
+                  <span className="tabular-nums text-slate-500">{count}</span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+                  <div className="h-full rounded-full bg-slate-700" style={{ width }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-3 flex items-center gap-2">
+          <BarChart3 className="h-4 w-4 text-slate-500" />
+          <h2 className="text-sm font-bold text-slate-950">Gates</h2>
+        </div>
+        {populatedGateCounts.length > 0 ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {populatedGateCounts.map((option) => (
+              <div key={option.value} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                <span className="font-medium text-slate-700">{option.label}</span>
+                <span className="tabular-nums text-slate-500">{analysis.countsByGate[option.value]}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500">No gates in this tree.</p>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-3 flex items-center gap-2">
+          <AlertTriangle className="h-4 w-4 text-slate-500" />
+          <h2 className="text-sm font-bold text-slate-950">Checks</h2>
+        </div>
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
+            <span className="font-medium text-slate-700">FTA rule violations</span>
+            <span className={`tabular-nums ${analysis.ruleViolations.length ? "text-red-600" : "text-emerald-700"}`}>{analysis.ruleViolations.length}</span>
+          </div>
+          <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
+            <span className="font-medium text-slate-700">Calculation gaps</span>
+            <span className={`tabular-nums ${analysis.probabilityIssues.length ? "text-amber-600" : "text-emerald-700"}`}>{analysis.probabilityIssues.length}</span>
+          </div>
+        </div>
+        {analysis.probabilityIssues.length > 0 && (
+          <ul className="mt-3 space-y-1 text-xs text-slate-500">
+            {analysis.probabilityIssues.slice(0, 4).map((issue) => (
+              <li key={issue}>{issue}</li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function TreeNode({
+  node,
+  rootId,
+  depth,
+  selectedId,
+  draggedId,
+  dragOverId,
+  dragOverValid,
+  onSelect,
+  onToggle,
+  onDragStart,
+  onDragOverNode,
+  onDragLeaveNode,
+  onDropNode,
+  onDragEnd,
+}) {
   const hasChildren = node.children.length > 0;
   const selected = selectedId === node.id;
+  const draggable = node.id !== rootId;
+  const isDragging = draggedId === node.id;
+  const isDropTarget = dragOverId === node.id && draggedId !== node.id;
+  const stateClass = isDropTarget
+    ? dragOverValid
+      ? "border-emerald-400 ring-2 ring-emerald-100"
+      : "border-red-400 ring-2 ring-red-100"
+    : selected
+    ? "border-indigo-400 ring-2 ring-indigo-100"
+    : "border-slate-200";
 
   return (
     <div className="relative">
       <motion.div
         layout
-        className={`mb-2 rounded-2xl border bg-white shadow-sm ${selected ? "border-indigo-400 ring-2 ring-indigo-100" : "border-slate-200"}`}
+        onDragOver={(event) => onDragOverNode(event, node.id)}
+        onDragLeave={(event) => onDragLeaveNode(event, node.id)}
+        onDrop={(event) => onDropNode(event, node.id)}
+        className={`mb-2 rounded-2xl border bg-white shadow-sm transition ${stateClass} ${isDragging ? "opacity-50" : ""}`}
         style={{ marginLeft: depth * 18 }}
       >
-        <button className="flex w-full items-center gap-2 p-3 text-left" onClick={() => onSelect(node.id)}>
+        <div className="flex w-full items-center gap-2 p-3 text-left">
           <button
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-slate-50 text-slate-500"
-            onClick={(e) => {
-              e.stopPropagation();
+            onClick={() => {
               if (hasChildren) onToggle(node.id);
             }}
             aria-label="Toggle node"
+            type="button"
           >
             {hasChildren ? node.expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" /> : <GitBranch className="h-4 w-4 opacity-30" />}
           </button>
-          <GateBadge node={node} />
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <p className="truncate text-sm font-semibold text-slate-900">{node.title || "Untitled node"}</p>
+          <button
+            className="flex min-w-0 flex-1 items-center gap-2 rounded-xl text-left outline-none focus-visible:ring-2 focus-visible:ring-indigo-200"
+            onClick={() => onSelect(node.id)}
+            type="button"
+          >
+            <GateBadge node={node} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <p className="truncate text-sm font-semibold text-slate-900">{node.title || "Untitled node"}</p>
+              </div>
+              <p className="truncate text-xs text-slate-500">
+                {typeLabels[node.type] || node.type}{node.type === "GATE" ? ` · ${gateTypeLabels[node.gateType] || node.gateType} gate` : ""}{node.probability ? ` · P=${node.probability}` : ""}
+              </p>
             </div>
-            <p className="truncate text-xs text-slate-500">
-              {typeLabels[node.type] || node.type}{node.type === "GATE" ? ` · ${gateTypeLabels[node.gateType] || node.gateType} gate` : ""}{node.probability ? ` · P=${node.probability}` : ""}
-            </p>
+          </button>
+          <div
+            className={`flex h-9 w-7 shrink-0 items-center justify-center rounded-xl text-slate-400 transition ${draggable ? "cursor-grab hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing" : "cursor-not-allowed opacity-35"}`}
+            draggable={draggable}
+            onDragStart={(event) => onDragStart(event, node.id)}
+            onDragEnd={onDragEnd}
+            onClick={(event) => event.stopPropagation()}
+            role="button"
+            tabIndex={draggable ? 0 : -1}
+            aria-label={draggable ? `Drag ${node.title || "node"}` : "Top event cannot be moved"}
+            title={draggable ? "Drag node" : "Top event cannot be moved"}
+          >
+            <GripVertical className="h-5 w-5" />
           </div>
-        </button>
+        </div>
       </motion.div>
       <AnimatePresence initial={false}>
         {node.expanded && hasChildren && (
@@ -462,10 +766,19 @@ function TreeNode({ node, depth, selectedId, onSelect, onToggle }) {
               <TreeNode
                 key={child.id}
                 node={child}
+                rootId={rootId}
                 depth={depth + 1}
                 selectedId={selectedId}
+                draggedId={draggedId}
+                dragOverId={dragOverId}
+                dragOverValid={dragOverValid}
                 onSelect={onSelect}
                 onToggle={onToggle}
+                onDragStart={onDragStart}
+                onDragOverNode={onDragOverNode}
+                onDragLeaveNode={onDragLeaveNode}
+                onDropNode={onDropNode}
+                onDragEnd={onDragEnd}
               />
             ))}
           </motion.div>
@@ -487,6 +800,7 @@ function BottomDrawer({ selected, rootId, parentNode, onClose, onSave, onAddChil
   return (
     <AnimatePresence>
       <motion.div
+        key="drawer-backdrop"
         className="fixed inset-0 z-40 bg-slate-950/30"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -494,6 +808,7 @@ function BottomDrawer({ selected, rootId, parentNode, onClose, onSave, onAddChil
         onClick={onClose}
       />
       <motion.div
+        key={`drawer-panel-${selected.id}`}
         className="fixed inset-x-0 bottom-0 z-50 max-h-[82vh] overflow-y-auto rounded-t-3xl bg-white p-4 shadow-2xl"
         initial={{ y: "100%" }}
         animate={{ y: 0 }}
@@ -642,10 +957,14 @@ function BottomDrawer({ selected, rootId, parentNode, onClose, onSave, onAddChil
 
 export default function FTAMobilePrototype() {
   const [tree, setTree] = useState(initialTree);
+  const [activeView, setActiveView] = useState("tree");
   const [selectedId, setSelectedId] = useState(null);
   const [storageStatus, setStorageStatus] = useState("loading");
   const [importError, setImportError] = useState("");
   const [ruleFeedback, setRuleFeedback] = useState(null);
+  const [draggedId, setDraggedId] = useState(null);
+  const [dragOverId, setDragOverId] = useState(null);
+  const [dragOverValid, setDragOverValid] = useState(false);
   const [dbReady, setDbReady] = useState(false);
   const fileInputRef = useRef(null);
   const selected = selectedId ? findNode(tree, selectedId) : null;
@@ -709,6 +1028,71 @@ export default function FTAMobilePrototype() {
   const toggleNode = (id) => {
     const node = findNode(tree, id);
     setTree(updateNode(tree, id, { expanded: !node.expanded }));
+  };
+
+  const startNodeDrag = (event, nodeId) => {
+    if (nodeId === tree.id) {
+      event.preventDefault();
+      showRuleFeedback(formatRuleMessage("The top event cannot be moved"));
+      return;
+    }
+
+    event.stopPropagation();
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(DRAG_NODE_MIME_TYPE, nodeId);
+    event.dataTransfer.setData("text/plain", nodeId);
+    setDraggedId(nodeId);
+    setDragOverId(null);
+    setDragOverValid(false);
+  };
+
+  const dragOverNode = (event, nodeId) => {
+    if (!draggedId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    const ruleCheck = validateMoveNode(tree, draggedId, nodeId);
+    setDragOverId(nodeId);
+    setDragOverValid(ruleCheck.valid);
+  };
+
+  const leaveDraggedNode = (event, nodeId) => {
+    event.stopPropagation();
+    if (event.currentTarget.contains(event.relatedTarget)) return;
+
+    if (dragOverId === nodeId) {
+      setDragOverId(null);
+      setDragOverValid(false);
+    }
+  };
+
+  const finishNodeDrag = () => {
+    setDraggedId(null);
+    setDragOverId(null);
+    setDragOverValid(false);
+  };
+
+  const dropNode = (event, targetParentId) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const movedId = event.dataTransfer.getData(DRAG_NODE_MIME_TYPE) || event.dataTransfer.getData("text/plain") || draggedId;
+    if (!movedId) {
+      finishNodeDrag();
+      return;
+    }
+
+    const ruleCheck = validateMoveNode(tree, movedId, targetParentId);
+    if (!ruleCheck.valid) {
+      showRuleFeedback(ruleCheck.error);
+      finishNodeDrag();
+      return;
+    }
+
+    setTree(moveNode(tree, movedId, targetParentId));
+    setSelectedId(movedId);
+    finishNodeDrag();
   };
 
   const saveNode = (draft) => {
@@ -844,15 +1228,54 @@ export default function FTAMobilePrototype() {
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_right,_rgba(79,70,229,0.16),_transparent_34%),linear-gradient(180deg,#f8fbff_0%,#eef2ff_100%)] text-slate-950">
       <div className="mx-auto flex min-h-screen w-screen flex-col">
         <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 px-4 py-2 backdrop-blur">
-          <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">Fault Tree Analysis</p>
-          <p className="text-xs text-slate-500">{statusLabel} · {nodeCount} nodes</p>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">Fault Tree Analysis</p>
+              <p className="truncate text-xs text-slate-500">{statusLabel} · {nodeCount} nodes</p>
+            </div>
+            <div className="grid w-36 shrink-0 grid-cols-2 rounded-md bg-slate-100 p-0.5">
+              <button
+                className={`flex h-7 items-center justify-center gap-1 rounded text-xs font-semibold transition ${activeView === "tree" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}
+                onClick={() => setActiveView("tree")}
+                type="button"
+              >
+                <GitBranch className="h-3.5 w-3.5" /> Tree
+              </button>
+              <button
+                className={`flex h-7 items-center justify-center gap-1 rounded text-xs font-semibold transition ${activeView === "analysis" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}
+                onClick={() => setActiveView("analysis")}
+                type="button"
+              >
+                <BarChart3 className="h-3.5 w-3.5" /> Analysis
+              </button>
+            </div>
+          </div>
           {importError && <p className="text-xs text-red-600">{importError}</p>}
         </header>
         <RuleFeedback feedback={ruleFeedback} onDismiss={() => setRuleFeedback(null)} />
         <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pb-24 pt-6">
 
         <main className="flex-1 space-y-4 px-0 py-4">
-          <TreeNode node={tree} depth={0} selectedId={selectedId} onSelect={setSelectedId} onToggle={toggleNode} />
+          {activeView === "tree" ? (
+            <TreeNode
+              node={tree}
+              rootId={tree.id}
+              depth={0}
+              selectedId={selectedId}
+              draggedId={draggedId}
+              dragOverId={dragOverId}
+              dragOverValid={dragOverValid}
+              onSelect={setSelectedId}
+              onToggle={toggleNode}
+              onDragStart={startNodeDrag}
+              onDragOverNode={dragOverNode}
+              onDragLeaveNode={leaveDraggedNode}
+              onDropNode={dropNode}
+              onDragEnd={finishNodeDrag}
+            />
+          ) : (
+            <AnalysisView tree={tree} />
+          )}
         </main>
 
         <input
@@ -864,7 +1287,14 @@ export default function FTAMobilePrototype() {
         />
         <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-200 bg-white/95 px-3 py-2 backdrop-blur">
           <div className="mx-auto grid max-w-3xl grid-cols-4 gap-2">
-            <Button className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm" variant="ghost" onClick={() => setTree(cloneTree(initialTree))}>
+            <Button
+              className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm"
+              variant="ghost"
+              onClick={() => {
+                setTree(cloneTree(initialTree));
+                setActiveView("tree");
+              }}
+            >
               <Upload className="mr-2 h-4 w-4" /> Demo
             </Button>
             <Button className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm" variant="ghost" onClick={importJson}>
@@ -873,7 +1303,14 @@ export default function FTAMobilePrototype() {
             <Button className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm" variant="ghost" onClick={exportJson}>
               <Download className="mr-2 h-4 w-4" /> Export
             </Button>
-            <Button className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm" variant="ghost" onClick={() => setSelectedId(tree.id)}>
+            <Button
+              className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm"
+              variant="ghost"
+              onClick={() => {
+                setActiveView("tree");
+                setSelectedId(tree.id);
+              }}
+            >
               Edit top
             </Button>
           </div>
