@@ -3,23 +3,29 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertTriangle,
   BarChart3,
+  ChevronsDownUp,
+  ChevronsUpDown,
   ChevronDown,
   ChevronRight,
+  CircleQuestionMark,
   Plus,
+  ListChecks,
+  Redo2,
+  Search,
   Trash2,
+  Undo2,
   X,
   Save,
   Settings,
   GitBranch,
   GripVertical,
-  Upload,
-  Download,
   GitFork,
 } from "lucide-react";
 import { Button } from "./components/ui/button";
 import andGateSymbol from "./assets/symbols/and-gate.svg";
 import basicEventSymbol from "./assets/symbols/basic-event.svg";
 import exclusiveOrGateSymbol from "./assets/symbols/exclusive-or-gate.svg";
+import houseEventSymbol from "./assets/symbols/house-event.svg";
 import inhibitGateSymbol from "./assets/symbols/inhibit-gate.svg";
 import intermediateEventSymbol from "./assets/symbols/intermediate-event.svg";
 import orGateSymbol from "./assets/symbols/or-gate.svg";
@@ -111,6 +117,7 @@ const gateTypeOptions = [
 ];
 
 const FTA_STANDARD_LABEL = "EIA 61025:2017";
+const TREE_HISTORY_LIMIT = 80;
 
 const typeLabels = {
   TOP_EVENT: "Top event",
@@ -135,6 +142,17 @@ const gateTypeLabels = {
   SPARE: "Spare",
   NULL: "Null",
 };
+const gateRuleKeyByGateType = {
+  AND: "AND_GATE",
+  OR: "OR_GATE",
+  INHIBIT: "INHIBIT_GATE",
+  K_OUT_OF_N: "MAJORITY_VOTE_GATE",
+  XOR: "EXCLUSIVE_OR_GATE",
+  PRIORITY_AND: "PRIORITY_AND_GATE",
+  SEQUENTIAL: "SEQUENTIAL_GATE",
+  SPARE: "SPARE_GATE",
+  NULL: "NULL_GATE",
+};
 
 const symbolByNodeType = {
   TOP_EVENT: intermediateEventSymbol,
@@ -144,7 +162,7 @@ const symbolByNodeType = {
   TRANSFER_OUT: transferOutSymbol,
   TRANSFER_IN: transferOutSymbol,
   DORMANT_EVENT: undevelopedEventSymbol,
-  HOUSE_EVENT: basicEventSymbol,
+  HOUSE_EVENT: houseEventSymbol,
   CONDITIONAL_EVENT: basicEventSymbol,
 };
 
@@ -605,6 +623,10 @@ function getNodeTypeConfig(type) {
   return IEC_61025_RULES.nodeTypes[type] || null;
 }
 
+function getGateTypeConfig(gateType) {
+  return IEC_61025_RULES.gateTypes[gateRuleKeyByGateType[gateType]] || null;
+}
+
 function canHaveChildren(nodeType) {
   return getNodeTypeConfig(nodeType)?.canHaveChildren || false;
 }
@@ -664,10 +686,6 @@ function uid() {
   return `n-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-function cloneTree(node) {
-  return { ...node, children: node.children.map(cloneTree) };
-}
-
 function findNode(node, id) {
   if (node.id === id) return node;
   for (const child of node.children) {
@@ -707,6 +725,42 @@ function moveNode(tree, movedId, targetParentId) {
   if (!movedNode) return tree;
 
   return addChild(deleteNode(tree, movedId), targetParentId, movedNode);
+}
+
+function areTreesEqual(firstTree, secondTree) {
+  return JSON.stringify(firstTree) === JSON.stringify(secondTree);
+}
+
+function setTreeExpanded(node, expanded) {
+  return {
+    ...node,
+    expanded,
+    children: node.children.map((child) => setTreeExpanded(child, expanded)),
+  };
+}
+
+function findNodePath(node, id, path = []) {
+  const nextPath = [...path, node.id];
+  if (node.id === id) return nextPath;
+
+  for (const child of node.children) {
+    const childPath = findNodePath(child, id, nextPath);
+    if (childPath) return childPath;
+  }
+
+  return null;
+}
+
+function expandNodePath(node, targetId) {
+  const path = findNodePath(node, targetId);
+  if (!path) return node;
+
+  const expandedIds = new Set(path);
+  return {
+    ...node,
+    expanded: expandedIds.has(node.id) ? true : node.expanded,
+    children: node.children.map((child) => expandNodePath(child, targetId)),
+  };
 }
 
 function flattenCount(node) {
@@ -812,6 +866,25 @@ function collectRuleViolations(node, parentNode = null, isRoot = true, violation
 
 function getFirstRuleViolation(tree) {
   return collectRuleViolations(tree)[0] || "";
+}
+
+function getNodeDisplayName(node) {
+  return node.title?.trim() || typeLabels[node.type] || "Untitled node";
+}
+
+function collectStructureCompletionIssues(node, issues = []) {
+  const nodeName = getNodeDisplayName(node);
+
+  if (["TOP_EVENT", "INTERMEDIATE_EVENT", "TRANSFER_OUT"].includes(node.type) && !hasGateChild(node)) {
+    issues.push(`${nodeName} needs a gate to connect input events.`);
+  }
+
+  if (node.type === "GATE" && node.children.length === 0) {
+    issues.push(`${nodeName} needs at least one input event.`);
+  }
+
+  node.children.forEach((child) => collectStructureCompletionIssues(child, issues));
+  return issues;
 }
 
 function parseProbability(value) {
@@ -941,6 +1014,59 @@ function analyzeTree(tree) {
   };
 }
 
+function getTreeValidationReport(tree) {
+  const analysis = analyzeTree(tree);
+  const structureIssues = [...new Set(collectStructureCompletionIssues(tree))];
+
+  return {
+    calculationIssues: analysis.probabilityIssues,
+    ruleViolations: analysis.ruleViolations,
+    structureIssues,
+    totalIssues: analysis.ruleViolations.length + structureIssues.length + analysis.probabilityIssues.length,
+  };
+}
+
+function normalizeSearchText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function getNodeTypeText(node) {
+  return node.type === "GATE"
+    ? `${gateTypeLabels[node.gateType] || node.gateType} gate`
+    : typeLabels[node.type] || node.type;
+}
+
+function collectTreeSearchResults(node, query, path = [], results = []) {
+  const normalizedQuery = normalizeSearchText(query);
+  if (!normalizedQuery) return results;
+
+  const title = getNodeDisplayName(node);
+  const nextPath = [...path, title];
+  const typeText = getNodeTypeText(node);
+  const fields = [
+    title,
+    node.description,
+    node.probability,
+    node.id,
+    typeText,
+    nextPath.join(" "),
+  ];
+  const searchableText = normalizeSearchText(fields.filter(Boolean).join(" "));
+
+  if (searchableText.includes(normalizedQuery)) {
+    results.push({
+      id: node.id,
+      node,
+      path: nextPath,
+      title,
+      typeText,
+    });
+  }
+
+  node.children.forEach((child) => collectTreeSearchResults(child, query, nextPath, results));
+  return results;
+}
+
 const DB_NAME = "minifta";
 const STORE_NAME = "fta-trees";
 const DB_VERSION = 1;
@@ -1067,6 +1193,31 @@ function GateBadge({ node }) {
   );
 }
 
+function getLegendFallbackText(type, gateType = null) {
+  if (!gateType) return type === "GATE" ? "GATE" : typeLabels[type]?.slice(0, 3).toUpperCase() || type;
+  if (gateType === "K_OUT_OF_N") return "K/N";
+  if (gateType === "PRIORITY_AND") return "PAND";
+  if (gateType === "SEQUENTIAL") return "SEQ";
+  if (gateType === "SPARE") return "SP";
+  return gateTypeLabels[gateType] || gateType;
+}
+
+function LegendSymbol({ type, gateType = null }) {
+  const symbol = gateType ? symbolByGateType[gateType] : symbolByNodeType[type];
+  const label = gateType ? gateTypeLabels[gateType] || gateType : typeLabels[type] || type;
+  const palette = getSymbolPalette({ type: gateType ? "GATE" : type });
+
+  return (
+    <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-sm ring-1 ${palette}`} title={label}>
+      {symbol ? (
+        <img className="h-7 w-7" src={symbol} alt="" draggable={false} aria-hidden="true" />
+      ) : (
+        <span className="text-[9px] font-bold">{getLegendFallbackText(type, gateType)}</span>
+      )}
+    </div>
+  );
+}
+
 function NodeMeta({ node }) {
   const typeText = node.type === "GATE"
     ? `${gateTypeLabels[node.gateType] || node.gateType} gate`
@@ -1107,6 +1258,339 @@ function RuleFeedback({ feedback, onDismiss }) {
             <X className="h-4 w-4" />
           </button>
         </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+function ValidationIssueSection({ title, issues }) {
+  if (issues.length === 0) return null;
+
+  return (
+    <section className="border-t border-slate-200 pt-4">
+      <h3 className="text-sm font-bold text-slate-950">{title}</h3>
+      <ul className="mt-2 space-y-2">
+        {issues.map((issue, index) => (
+          <li key={`${title}-${index}-${issue}`} className="rounded-lg bg-red-50 px-3 py-2 text-sm leading-snug text-red-900">
+            {issue}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ValidationModal({ tree, open, onClose }) {
+  const report = useMemo(() => getTreeValidationReport(tree), [tree]);
+  const hasIssues = report.totalIssues > 0;
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <>
+          <motion.div
+            key="validation-backdrop"
+            className="fixed inset-0 z-[80] bg-slate-950/30"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onClose}
+          />
+          <motion.div
+            key="validation-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="validation-dialog-title"
+            className="fixed inset-x-4 top-20 z-[90] mx-auto max-h-[78vh] max-w-3xl overflow-y-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
+            initial={{ opacity: 0, y: 12, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 12, scale: 0.98 }}
+            transition={{ duration: 0.18 }}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Validation</p>
+                <h2 id="validation-dialog-title" className="text-lg font-bold text-slate-950">
+                  {hasIssues ? `${report.totalIssues} issue${report.totalIssues === 1 ? "" : "s"} found` : "No validation errors found"}
+                </h2>
+              </div>
+              <button
+                type="button"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+                onClick={onClose}
+                aria-label="Close validation results"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {!hasIssues ? (
+              <div className="mt-4 rounded-lg bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-800">
+                The tree passes the current structural and calculation checks.
+              </div>
+            ) : (
+              <div className="mt-4 space-y-4">
+                <ValidationIssueSection title="FTA rule errors" issues={report.ruleViolations} />
+                <ValidationIssueSection title="Incomplete structure" issues={report.structureIssues} />
+                <ValidationIssueSection title="Calculation gaps" issues={report.calculationIssues} />
+              </div>
+            )}
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
+}
+
+function LegendItem({ children, description, label, meta, symbol }) {
+  return (
+    <div className="flex items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+      {symbol}
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm font-bold text-slate-950">{label}</p>
+          {meta && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500">{meta}</span>}
+        </div>
+        {description && <p className="mt-1 text-xs leading-snug text-slate-500">{description}</p>}
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function HelpLegendModal({ open, onClose }) {
+  const ruleNotes = [
+    "Top and intermediate events are developed through a single child gate.",
+    "Gates connect input events and enforce the selected logical operator.",
+    "Primary, house, conditional, and transfer-in events are terminal inputs.",
+    "Transfer-out events mark a continuation that may be developed through a gate.",
+  ];
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <>
+          <motion.div
+            key="help-backdrop"
+            className="fixed inset-0 z-[80] bg-slate-950/30"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onClose}
+          />
+          <motion.div
+            key="help-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="help-dialog-title"
+            className="fixed inset-x-4 top-12 z-[90] mx-auto max-h-[84vh] max-w-3xl overflow-y-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
+            initial={{ opacity: 0, y: 12, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 12, scale: 0.98 }}
+            transition={{ duration: 0.18 }}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Reference</p>
+                <h2 id="help-dialog-title" className="text-lg font-bold text-slate-950">Help / Legend</h2>
+              </div>
+              <button
+                type="button"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+                onClick={onClose}
+                aria-label="Close help and legend"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-5">
+              <section>
+                <h3 className="text-sm font-bold text-slate-950">Node Symbols</h3>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {nodeTypeOptions.map((option) => {
+                    const config = getNodeTypeConfig(option.value);
+                    return (
+                      <LegendItem
+                        key={option.value}
+                        label={option.label}
+                        meta={config?.category}
+                        description={config?.description}
+                        symbol={<LegendSymbol type={option.value} />}
+                      />
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className="border-t border-slate-200 pt-4">
+                <h3 className="text-sm font-bold text-slate-950">Gate Operators</h3>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {gateTypeOptions.map((option) => {
+                    const config = getGateTypeConfig(option.value);
+                    return (
+                      <LegendItem
+                        key={option.value}
+                        label={option.label}
+                        meta={option.category}
+                        description={config?.description}
+                        symbol={<LegendSymbol type="GATE" gateType={option.value} />}
+                      />
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className="border-t border-slate-200 pt-4">
+                <h3 className="text-sm font-bold text-slate-950">Rule Notes</h3>
+                <div className="mt-2 grid gap-2">
+                  {ruleNotes.map((note) => (
+                    <div key={note} className="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-snug text-slate-700">
+                      {note}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
+}
+
+function SearchModal({ tree, open, onClose, onSelectResult }) {
+  const [query, setQuery] = useState("");
+  const inputRef = useRef(null);
+  const trimmedQuery = query.trim();
+  const results = useMemo(() => collectTreeSearchResults(tree, query).slice(0, 60), [tree, query]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <>
+          <motion.div
+            key="search-backdrop"
+            className="fixed inset-0 z-[80] bg-slate-950/30"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onClose}
+          />
+          <motion.div
+            key="search-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="search-dialog-title"
+            className="fixed inset-x-4 top-16 z-[90] mx-auto max-h-[80vh] max-w-3xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+            initial={{ opacity: 0, y: 12, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 12, scale: 0.98 }}
+            transition={{ duration: 0.18 }}
+          >
+            <div className="border-b border-slate-200 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Tree search</p>
+                  <h2 id="search-dialog-title" className="text-lg font-bold text-slate-950">Find nodes</h2>
+                </div>
+                <button
+                  type="button"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+                  onClick={onClose}
+                  aria-label="Close search"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <label className="mt-4 flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 focus-within:border-indigo-400">
+                <Search className="h-4 w-4 shrink-0 text-slate-400" />
+                <input
+                  ref={inputRef}
+                  className="min-w-0 flex-1 bg-transparent text-base text-slate-950 outline-none placeholder:text-slate-400"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Search titles, descriptions, types, gates..."
+                />
+              </label>
+            </div>
+
+            <div className="max-h-[52vh] overflow-y-auto p-4">
+              {!trimmedQuery ? (
+                <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-500">
+                  Start typing to search the fault tree.
+                </p>
+              ) : results.length === 0 ? (
+                <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-500">
+                  No matching nodes found.
+                </p>
+              ) : (
+                <div className="grid gap-2">
+                  {results.map((result) => (
+                    <button
+                      key={result.id}
+                      type="button"
+                      className="flex w-full items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 text-left shadow-sm transition hover:border-indigo-300 hover:bg-indigo-50"
+                      onClick={() => {
+                        onSelectResult(result.id);
+                        onClose();
+                      }}
+                    >
+                      <GateBadge node={result.node} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="truncate text-sm font-bold text-slate-950">{result.title}</p>
+                          <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500">
+                            {result.typeText}
+                          </span>
+                        </div>
+                        {result.node.description && (
+                          <p className="mt-1 line-clamp-2 text-xs leading-snug text-slate-500">{result.node.description}</p>
+                        )}
+                        <p className="mt-2 truncate text-xs text-slate-400">{result.path.join(" / ")}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        </>
       )}
     </AnimatePresence>
   );
@@ -1320,6 +1804,60 @@ function SettingsView({
         </div>
       </section>
     </div>
+  );
+}
+
+function TreeToolbarButton({ disabled = false, label, icon: Icon, onClick }) {
+  const isReady = typeof onClick === "function";
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className="h-11 w-full min-w-0 rounded-lg px-0 text-slate-700"
+      onClick={onClick}
+      disabled={!isReady || disabled}
+      aria-label={label}
+      title={isReady ? label : `${label} planned`}
+    >
+      <Icon className="h-4 w-4" />
+    </Button>
+  );
+}
+
+function TreeToolbar({
+  canRedo = false,
+  canUndo = false,
+  onUndo,
+  onRedo,
+  onExpandAll,
+  onCollapseAll,
+  onSearch,
+  onHelp,
+  onValidate,
+}) {
+  const toolbarActions = [
+    { label: "Undo", icon: Undo2, onClick: onUndo, disabled: !canUndo },
+    { label: "Redo", icon: Redo2, onClick: onRedo, disabled: !canRedo },
+    { label: "Expand all", icon: ChevronsUpDown, onClick: onExpandAll },
+    { label: "Collapse all", icon: ChevronsDownUp, onClick: onCollapseAll },
+    { label: "Search", icon: Search, onClick: onSearch },
+    { label: "Help and legend", icon: CircleQuestionMark, onClick: onHelp },
+    { label: "Validate", icon: ListChecks, onClick: onValidate },
+  ];
+
+  return (
+    <nav
+      className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-200 bg-white/95 px-3 py-2 backdrop-blur dark:border-slate-700 dark:bg-slate-900/95"
+      aria-label="Tree toolbar"
+    >
+      <div className="mx-auto grid max-w-3xl grid-cols-7 gap-1">
+        {toolbarActions.map((action) => (
+          <TreeToolbarButton key={action.label} {...action} />
+        ))}
+      </div>
+    </nav>
   );
 }
 
@@ -1660,18 +2198,68 @@ export default function FTAMobilePrototype() {
   const [storageStatus, setStorageStatus] = useState("loading");
   const [importError, setImportError] = useState("");
   const [ruleFeedback, setRuleFeedback] = useState(null);
+  const [validationOpen, setValidationOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
   const [dragOverValid, setDragOverValid] = useState(false);
+  const [undoStack, setUndoStack] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
   const [dbReady, setDbReady] = useState(false);
   const fileInputRef = useRef(null);
   const pointerDragRef = useRef(null);
   const selected = selectedId ? findNode(tree, selectedId) : null;
   const selectedParent = selectedId ? findParentNode(tree, selectedId) : null;
   const nodeCount = useMemo(() => flattenCount(tree), [tree]);
+  const canUndo = undoStack.length > 0;
+  const canRedo = redoStack.length > 0;
 
   const showRuleFeedback = (message) => {
     setRuleFeedback({ id: uid(), message });
+  };
+
+  const getCurrentSnapshot = () => ({ tree, selectedId });
+
+  const restoreSnapshot = (snapshot) => {
+    setTree(snapshot.tree);
+    setSelectedId(snapshot.selectedId && findNode(snapshot.tree, snapshot.selectedId) ? snapshot.selectedId : null);
+    setDraggedId(null);
+    setDragOverId(null);
+    setDragOverValid(false);
+    pointerDragRef.current = null;
+  };
+
+  const commitTreeChange = (updater, options = {}) => {
+    const nextTree = typeof updater === "function" ? updater(tree) : updater;
+    if (areTreesEqual(tree, nextTree)) return false;
+
+    const requestedSelectedId = Object.prototype.hasOwnProperty.call(options, "nextSelectedId") ? options.nextSelectedId : selectedId;
+    const nextSelectedId = requestedSelectedId && findNode(nextTree, requestedSelectedId) ? requestedSelectedId : null;
+
+    setUndoStack((history) => [...history, getCurrentSnapshot()].slice(-TREE_HISTORY_LIMIT));
+    setRedoStack([]);
+    setTree(nextTree);
+    setSelectedId(nextSelectedId);
+    return true;
+  };
+
+  const undoTreeChange = () => {
+    if (!canUndo) return;
+
+    const previousSnapshot = undoStack[undoStack.length - 1];
+    setUndoStack((history) => history.slice(0, -1));
+    setRedoStack((history) => [...history, getCurrentSnapshot()].slice(-TREE_HISTORY_LIMIT));
+    restoreSnapshot(previousSnapshot);
+  };
+
+  const redoTreeChange = () => {
+    if (!canRedo) return;
+
+    const nextSnapshot = redoStack[redoStack.length - 1];
+    setRedoStack((history) => history.slice(0, -1));
+    setUndoStack((history) => [...history, getCurrentSnapshot()].slice(-TREE_HISTORY_LIMIT));
+    restoreSnapshot(nextSnapshot);
   };
 
   useEffect(() => {
@@ -1726,7 +2314,21 @@ export default function FTAMobilePrototype() {
 
   const toggleNode = (id) => {
     const node = findNode(tree, id);
-    setTree(updateNode(tree, id, { expanded: !node.expanded }));
+    commitTreeChange(updateNode(tree, id, { expanded: !node.expanded }));
+  };
+
+  const expandAllNodes = () => {
+    commitTreeChange((currentTree) => setTreeExpanded(currentTree, true));
+  };
+
+  const collapseAllNodes = () => {
+    commitTreeChange((currentTree) => setTreeExpanded(currentTree, false));
+  };
+
+  const selectSearchResult = (nodeId) => {
+    setActiveView("tree");
+    setTree((currentTree) => expandNodePath(currentTree, nodeId));
+    setSelectedId(nodeId);
   };
 
   const startNodeDrag = (event, nodeId) => {
@@ -1859,8 +2461,7 @@ export default function FTAMobilePrototype() {
       return;
     }
 
-    setTree(moveNode(tree, dragSession.nodeId, targetParentId));
-    setSelectedId(dragSession.nodeId);
+    commitTreeChange(moveNode(tree, dragSession.nodeId, targetParentId), { nextSelectedId: dragSession.nodeId });
     finishNodeDrag();
   };
 
@@ -1893,8 +2494,7 @@ export default function FTAMobilePrototype() {
       return;
     }
 
-    setTree(moveNode(tree, movedId, targetParentId));
-    setSelectedId(movedId);
+    commitTreeChange(moveNode(tree, movedId, targetParentId), { nextSelectedId: movedId });
     finishNodeDrag();
   };
 
@@ -1907,7 +2507,7 @@ export default function FTAMobilePrototype() {
       return ruleCheck;
     }
 
-    setTree(updateNode(tree, draft.id, getNodePatch(draft)));
+    commitTreeChange(updateNode(tree, draft.id, getNodePatch(draft)), { nextSelectedId: draft.id });
     return { valid: true };
   };
 
@@ -1956,14 +2556,12 @@ export default function FTAMobilePrototype() {
     }
 
     const nextTree = parentDraft ? updateNode(tree, parentId, getNodePatch(parentDraft)) : tree;
-    setTree(addChild(nextTree, parentId, child));
-    setSelectedId(child.id);
+    commitTreeChange(addChild(nextTree, parentId, child), { nextSelectedId: child.id });
     return { valid: true };
   };
 
   const removeNode = (id) => {
-    setTree(deleteNode(tree, id));
-    setSelectedId(null);
+    commitTreeChange(deleteNode(tree, id), { nextSelectedId: null });
   };
 
   const importJson = () => {
@@ -1987,8 +2585,7 @@ export default function FTAMobilePrototype() {
         if (ruleViolation) {
           throw new Error(ruleViolation);
         }
-        setTree(normalized);
-        setSelectedId(null);
+        commitTreeChange(normalized, { nextSelectedId: null });
         setImportError("");
         alert("FTA tree imported successfully.");
       } catch (error) {
@@ -2070,7 +2667,7 @@ export default function FTAMobilePrototype() {
         <RuleFeedback feedback={ruleFeedback} onDismiss={() => setRuleFeedback(null)} />
         <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pb-2 pt-0">
 
-        <main className="flex-1 space-y-4 px-0 py-4">
+        <main className={`flex-1 space-y-4 px-0 pt-4 ${activeView === "tree" ? "pb-20" : "pb-4"}`}>
           {activeView === "tree" ? (
             <TreeNode
               node={tree}
@@ -2123,42 +2720,34 @@ export default function FTAMobilePrototype() {
           className="hidden"
           onChange={handleImportFile}
         />
-        <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-200 bg-white/95 px-3 py-2 backdrop-blur">
-          <div className="mx-auto grid max-w-3xl grid-cols-4 gap-2">
-            <Button
-              className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm"
-              variant="ghost"
-              onClick={() => {
-                setTree(cloneTree(initialTree));
-                setActiveView("tree");
-              }}
-            >
-              <Upload className="mr-2 h-4 w-4" /> Demo
-            </Button>
-            <Button className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm" variant="ghost" onClick={importJson}>
-              <Upload className="mr-2 h-4 w-4 rotate-180 transform" /> Import
-            </Button>
-            <Button className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm" variant="ghost" onClick={exportJson}>
-              <Download className="mr-2 h-4 w-4" /> Export
-            </Button>
-            <Button
-              className="h-12 min-w-0 rounded-xl px-2 text-xs sm:text-sm"
-              variant="ghost"
-              onClick={() => {
-                setActiveView("tree");
-                setSelectedId(tree.id);
-              }}
-            >
-              Edit top
-            </Button>
-          </div>
-        </nav>
+        {activeView === "tree" && (
+          <TreeToolbar
+            canRedo={canRedo}
+            canUndo={canUndo}
+            onRedo={redoTreeChange}
+            onUndo={undoTreeChange}
+            onExpandAll={expandAllNodes}
+            onCollapseAll={collapseAllNodes}
+            onSearch={() => setSearchOpen(true)}
+            onHelp={() => setHelpOpen(true)}
+            onValidate={() => setValidationOpen(true)}
+          />
+        )}
       </div>
       </div>
 
+      <ValidationModal tree={tree} open={validationOpen} onClose={() => setValidationOpen(false)} />
+      <HelpLegendModal open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <SearchModal
+        tree={tree}
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onSelectResult={selectSearchResult}
+      />
+
       {selected && (
         <BottomDrawer
-          key={selected.id}
+          key={`${selected.id}-${selected.type}-${selected.gateType || ""}-${selected.title || ""}-${selected.description || ""}-${selected.probability || ""}`}
           selected={selected}
           rootId={tree.id}
           parentNode={selectedParent}
