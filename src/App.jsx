@@ -9,6 +9,7 @@ import {
   Trash2,
   X,
   Save,
+  Settings,
   GitBranch,
   GripVertical,
   Upload,
@@ -73,7 +74,7 @@ const initialTree = {
       children: [
         {
           id: "n2-1",
-          type: "TRANSFER_EVENT",
+          type: "TRANSFER_OUT",
           title: "External power transfer failure",
           description: "Fault chain enters a separate analysis boundary.",
           probability: "1e-4",
@@ -87,18 +88,26 @@ const initialTree = {
 
 const nodeTypeOptions = [
   { value: "TOP_EVENT", label: "Top event" },
-  { value: "GATE", label: "Gate" },
   { value: "INTERMEDIATE_EVENT", label: "Intermediate event" },
   { value: "BASIC_EVENT", label: "Basic event" },
   { value: "UNDEVELOPED_EVENT", label: "Undeveloped event" },
-  { value: "TRANSFER_EVENT", label: "Transfer event" },
+  { value: "DORMANT_EVENT", label: "Dormant event" },
+  { value: "HOUSE_EVENT", label: "House event" },
+  { value: "CONDITIONAL_EVENT", label: "Conditional event" },
+  { value: "TRANSFER_IN", label: "Transfer in" },
+  { value: "TRANSFER_OUT", label: "Transfer out" },
+  { value: "GATE", label: "Gate" },
 ];
 const gateTypeOptions = [
-  { value: "AND", label: "AND" },
-  { value: "OR", label: "OR" },
-  { value: "INHIBIT", label: "Inhibit" },
-  { value: "K_OUT_OF_N", label: "K/N" },
-  { value: "XOR", label: "Exclusive OR" },
+  { value: "AND", label: "AND", category: "STATIC" },
+  { value: "OR", label: "OR", category: "STATIC" },
+  { value: "INHIBIT", label: "Inhibit", category: "STATIC" },
+  { value: "K_OUT_OF_N", label: "K/N", category: "STATIC" },
+  { value: "XOR", label: "Exclusive OR", category: "STATIC" },
+  { value: "PRIORITY_AND", label: "Priority AND", category: "DYNAMIC" },
+  { value: "SEQUENTIAL", label: "Sequential", category: "DYNAMIC" },
+  { value: "SPARE", label: "Spare", category: "DYNAMIC" },
+  { value: "NULL", label: "Null", category: "STRUCTURAL" },
 ];
 
 const FTA_STANDARD_LABEL = "EIA 61025:2017";
@@ -109,7 +118,11 @@ const typeLabels = {
   INTERMEDIATE_EVENT: "Intermediate event",
   BASIC_EVENT: "Basic event",
   UNDEVELOPED_EVENT: "Undeveloped event",
-  TRANSFER_EVENT: "Transfer event",
+  DORMANT_EVENT: "Dormant event",
+  HOUSE_EVENT: "House event",
+  CONDITIONAL_EVENT: "Conditional event",
+  TRANSFER_IN: "Transfer in",
+  TRANSFER_OUT: "Transfer out",
 };
 const gateTypeLabels = {
   AND: "AND",
@@ -117,6 +130,10 @@ const gateTypeLabels = {
   INHIBIT: "Inhibit",
   K_OUT_OF_N: "K/N",
   XOR: "Exclusive OR",
+  PRIORITY_AND: "Priority AND",
+  SEQUENTIAL: "Sequential",
+  SPARE: "Spare",
+  NULL: "Null",
 };
 
 const symbolByNodeType = {
@@ -124,7 +141,11 @@ const symbolByNodeType = {
   INTERMEDIATE_EVENT: intermediateEventSymbol,
   BASIC_EVENT: basicEventSymbol,
   UNDEVELOPED_EVENT: undevelopedEventSymbol,
-  TRANSFER_EVENT: transferOutSymbol,
+  TRANSFER_OUT: transferOutSymbol,
+  TRANSFER_IN: transferOutSymbol,
+  DORMANT_EVENT: undevelopedEventSymbol,
+  HOUSE_EVENT: basicEventSymbol,
+  CONDITIONAL_EVENT: basicEventSymbol,
 };
 
 const symbolByGateType = {
@@ -135,28 +156,463 @@ const symbolByGateType = {
 };
 
 const DRAG_NODE_MIME_TYPE = "application/x-minifta-node";
+const NODE_DROP_TARGET_SELECTOR = "[data-node-drop-id]";
 
 const IEC_61025_RULES = {
+  nodeTypes: {
+    TOP_EVENT: {
+      category: "EVENT",
+      description: "Defined outcome of interest; root of the fault tree.",
+      isRootOnly: true,
+      canHaveChildren: true,
+      mayHaveGate: true,
+      maxOutgoingGates: 1,
+    },
+    INTERMEDIATE_EVENT: {
+      category: "EVENT",
+      description: "Event that is neither the top event nor a primary event.",
+      canHaveChildren: true,
+      mayHaveGate: true,
+      maxOutgoingGates: 1,
+    },
+    BASIC_EVENT: {
+      category: "PRIMARY_EVENT",
+      description: "Lowest-level event for which probability/reliability data are available.",
+      canHaveChildren: false,
+      mayHaveGate: false,
+    },
+    UNDEVELOPED_EVENT: {
+      category: "PRIMARY_EVENT",
+      description: "Primary event intentionally not developed further.",
+      canHaveChildren: false,
+      mayHaveGate: false,
+    },
+    DORMANT_EVENT: {
+      category: "PRIMARY_EVENT",
+      description: "Primary event representing a dormant failure not immediately detected.",
+      canHaveChildren: false,
+      mayHaveGate: false,
+    },
+    HOUSE_EVENT: {
+      category: "PRIMARY_EVENT",
+      description: "User-controlled TRUE/FALSE event used to include/exclude parts of an analysis.",
+      canHaveChildren: false,
+      mayHaveGate: false,
+      requiresBooleanState: true,
+    },
+    CONDITIONAL_EVENT: {
+      category: "CONDITION",
+      description: "Condition required for another event to occur; used with INHIBIT and dynamic gates.",
+      canHaveChildren: false,
+      mayHaveGate: false,
+      allowedParents: ["INHIBIT_GATE", "PRIORITY_AND_GATE"],
+    },
+    TRANSFER_IN: {
+      category: "TRANSFER",
+      description: "Reference to a fault-tree continuation developed elsewhere.",
+      canHaveChildren: false,
+      mayHaveGate: false,
+      requiresTargetReference: true,
+    },
+    TRANSFER_OUT: {
+      category: "TRANSFER",
+      description: "Connector indicating where a transferred subtree is developed.",
+      canHaveChildren: true,
+      mayHaveGate: true,
+      maxOutgoingGates: 1,
+      requiresTransferId: true,
+    },
+    GATE: {
+      category: "GATE",
+      description: "Logical operator connecting input events to an output event.",
+      canHaveChildren: true,
+      mustHaveGateType: true,
+    },
+  },
+
   canHaveChildren: {
     TOP_EVENT: true,
-    GATE: true,
     INTERMEDIATE_EVENT: true,
+    TRANSFER_OUT: true,
+    GATE: true,
     BASIC_EVENT: false,
     UNDEVELOPED_EVENT: false,
-    TRANSFER_EVENT: false,
+    DORMANT_EVENT: false,
+    HOUSE_EVENT: false,
+    CONDITIONAL_EVENT: false,
+    TRANSFER_IN: false,
   },
+
   allowedChildTypes: {
     TOP_EVENT: ["GATE"],
-    GATE: ["GATE", "INTERMEDIATE_EVENT", "BASIC_EVENT", "UNDEVELOPED_EVENT", "TRANSFER_EVENT"],
     INTERMEDIATE_EVENT: ["GATE"],
+    TRANSFER_OUT: ["GATE"],
+    GATE: [
+      "INTERMEDIATE_EVENT",
+      "BASIC_EVENT",
+      "UNDEVELOPED_EVENT",
+      "DORMANT_EVENT",
+      "HOUSE_EVENT",
+      "CONDITIONAL_EVENT",
+      "TRANSFER_IN",
+    ],
+    BASIC_EVENT: [],
+    UNDEVELOPED_EVENT: [],
+    DORMANT_EVENT: [],
+    HOUSE_EVENT: [],
+    CONDITIONAL_EVENT: [],
+    TRANSFER_IN: [],
+  },
+
+  relaxedAllowedChildTypes: {
+    GATE: [
+      "GATE",
+      "INTERMEDIATE_EVENT",
+      "BASIC_EVENT",
+      "UNDEVELOPED_EVENT",
+      "DORMANT_EVENT",
+      "HOUSE_EVENT",
+      "CONDITIONAL_EVENT",
+      "TRANSFER_IN",
+    ],
+  },
+
+  gateTypes: {
+    AND_GATE: {
+      category: "STATIC",
+      description: "Output occurs if all input events occur.",
+      minInputs: 2,
+      maxInputs: null,
+      allowedInputTypes: [
+        "INTERMEDIATE_EVENT",
+        "BASIC_EVENT",
+        "UNDEVELOPED_EVENT",
+        "DORMANT_EVENT",
+        "HOUSE_EVENT",
+        "TRANSFER_IN",
+      ],
+      calculation: "AND",
+      requiresIndependentInputsForSimpleQuantification: true,
+    },
+    OR_GATE: {
+      category: "STATIC",
+      description: "Output occurs if one or more input events occur.",
+      minInputs: 2,
+      maxInputs: null,
+      allowedInputTypes: [
+        "INTERMEDIATE_EVENT",
+        "BASIC_EVENT",
+        "UNDEVELOPED_EVENT",
+        "DORMANT_EVENT",
+        "HOUSE_EVENT",
+        "TRANSFER_IN",
+      ],
+      calculation: "OR",
+    },
+    EXCLUSIVE_OR_GATE: {
+      category: "STATIC",
+      description: "Output occurs if one, but not the other, input event occurs.",
+      minInputs: 2,
+      maxInputs: 2,
+      allowedInputTypes: [
+        "INTERMEDIATE_EVENT",
+        "BASIC_EVENT",
+        "UNDEVELOPED_EVENT",
+        "DORMANT_EVENT",
+        "HOUSE_EVENT",
+        "TRANSFER_IN",
+      ],
+      calculation: "XOR",
+    },
+    INHIBIT_GATE: {
+      category: "STATIC",
+      description: "Output occurs when the input event occurs under a stated condition.",
+      minInputs: 2,
+      maxInputs: 2,
+      requiredInputPattern: {
+        eventInputs: 1,
+        conditionalInputs: 1,
+      },
+      allowedInputTypes: [
+        "INTERMEDIATE_EVENT",
+        "BASIC_EVENT",
+        "UNDEVELOPED_EVENT",
+        "DORMANT_EVENT",
+        "HOUSE_EVENT",
+        "TRANSFER_IN",
+        "CONDITIONAL_EVENT",
+      ],
+      calculation: "AND_WITH_CONDITION",
+    },
+    MAJORITY_VOTE_GATE: {
+      category: "STATIC",
+      description: "Output occurs if at least m out of n input events occur.",
+      minInputs: 2,
+      maxInputs: null,
+      requiresVoteThreshold: true,
+      voteThresholdRules: {
+        min: 1,
+        max: "numberOfInputs",
+      },
+      allowedInputTypes: [
+        "INTERMEDIATE_EVENT",
+        "BASIC_EVENT",
+        "UNDEVELOPED_EVENT",
+        "DORMANT_EVENT",
+        "HOUSE_EVENT",
+        "TRANSFER_IN",
+      ],
+      calculation: "K_OUT_OF_N",
+    },
+    PRIORITY_AND_GATE: {
+      category: "DYNAMIC",
+      description: "Output occurs only if input events occur in a specified order.",
+      minInputs: 2,
+      maxInputs: null,
+      requiresInputOrdering: true,
+      allowedInputTypes: [
+        "INTERMEDIATE_EVENT",
+        "BASIC_EVENT",
+        "UNDEVELOPED_EVENT",
+        "DORMANT_EVENT",
+        "HOUSE_EVENT",
+        "TRANSFER_IN",
+        "CONDITIONAL_EVENT",
+      ],
+      calculation: "SEQUENCE_DEPENDENT",
+      requiresDynamicAnalysis: true,
+    },
+    SEQUENTIAL_GATE: {
+      category: "DYNAMIC",
+      description: "Output occurs only if all input events occur in left-to-right sequence.",
+      minInputs: 2,
+      maxInputs: null,
+      requiresInputOrdering: true,
+      allowedInputTypes: [
+        "INTERMEDIATE_EVENT",
+        "BASIC_EVENT",
+        "UNDEVELOPED_EVENT",
+        "DORMANT_EVENT",
+        "HOUSE_EVENT",
+        "TRANSFER_IN",
+      ],
+      calculation: "SEQUENCE_DEPENDENT",
+      requiresDynamicAnalysis: true,
+    },
+    SPARE_GATE: {
+      category: "DYNAMIC",
+      description: "Output occurs when available spare components fall below the required number.",
+      minInputs: 1,
+      maxInputs: null,
+      requiresSpareModel: true,
+      spareModels: ["COLD_SPARE", "WARM_SPARE", "HOT_SPARE"],
+      allowedInputTypes: [
+        "BASIC_EVENT",
+        "UNDEVELOPED_EVENT",
+        "DORMANT_EVENT",
+        "INTERMEDIATE_EVENT",
+        "TRANSFER_IN",
+      ],
+      calculation: "SPARE_DEPENDENCY",
+      requiresDynamicAnalysis: true,
+    },
+    NULL_GATE: {
+      category: "STRUCTURAL",
+      description: "Pass-through gate with one input, used by some rectangular notations.",
+      minInputs: 1,
+      maxInputs: 1,
+      allowedInputTypes: [
+        "INTERMEDIATE_EVENT",
+        "BASIC_EVENT",
+        "UNDEVELOPED_EVENT",
+        "DORMANT_EVENT",
+        "HOUSE_EVENT",
+        "TRANSFER_IN",
+      ],
+      calculation: "IDENTITY",
+      discourageForNewModels: true,
+    },
+  },
+
+  parentRules: {
+    TOP_EVENT: {
+      allowedParentTypes: [],
+      mustBeUnique: true,
+    },
+    GATE: {
+      allowedParentTypes: ["TOP_EVENT", "INTERMEDIATE_EVENT", "TRANSFER_OUT"],
+      parentRequired: true,
+      maxParents: 1,
+    },
+    INTERMEDIATE_EVENT: {
+      allowedParentTypes: ["GATE"],
+      parentRequired: true,
+      mayBeRepeated: true,
+    },
+    BASIC_EVENT: {
+      allowedParentTypes: ["GATE"],
+      parentRequired: true,
+      mayBeRepeated: true,
+    },
+    UNDEVELOPED_EVENT: {
+      allowedParentTypes: ["GATE"],
+      parentRequired: true,
+      mayBeRepeated: true,
+    },
+    DORMANT_EVENT: {
+      allowedParentTypes: ["GATE"],
+      parentRequired: true,
+      mayBeRepeated: true,
+    },
+    HOUSE_EVENT: {
+      allowedParentTypes: ["GATE"],
+      parentRequired: false,
+      mayBeRepeated: true,
+    },
+    CONDITIONAL_EVENT: {
+      allowedParentGateTypes: ["INHIBIT_GATE", "PRIORITY_AND_GATE"],
+      parentRequired: true,
+    },
+    TRANSFER_IN: {
+      allowedParentTypes: ["GATE"],
+      parentRequired: true,
+      requiresMatchingTransferOut: true,
+    },
+    TRANSFER_OUT: {
+      allowedParentTypes: [],
+      requiresMatchingTransferIn: true,
+    },
+  },
+
+  validation: {
+    requireSingleTopEvent: true,
+    requireTopEventHasGate: true,
+    maxOneGatePerDevelopedEvent: true,
+    terminalNodeTypes: [
+      "BASIC_EVENT",
+      "UNDEVELOPED_EVENT",
+      "DORMANT_EVENT",
+      "HOUSE_EVENT",
+      "CONDITIONAL_EVENT",
+      "TRANSFER_IN",
+    ],
+    repeatedEventRules: {
+      allowed: true,
+      requireSameEventCode: true,
+      requireCommonCauseFlagWhenSameCause: true,
+      countOnceInQuantitativeAnalysis: true,
+      requireDisjointingOrBDDForExactQuantification: true,
+    },
+    transferRules: {
+      transferInMustReferenceTransferOut: true,
+      transferOutMustExposeSubtree: true,
+      preventCircularTransfers: true,
+      referencedEventCodeMustMatch: true,
+    },
+    eventStateCompatibility: {
+      OR_GATE: {
+        allowMixedEventAndStateInputs: true,
+      },
+      AND_GATE: {
+        ifOutputIsEventThenInputsMustBeEvents: true,
+        ifOutputIsStateThenInputsMustBeStates: true,
+      },
+    },
+    dynamicGateRules: {
+      requireInputOrderFor: ["PRIORITY_AND_GATE", "SEQUENTIAL_GATE"],
+      requireDynamicAnalysisFor: ["PRIORITY_AND_GATE", "SEQUENTIAL_GATE", "SPARE_GATE"],
+      doNotUseStaticCutSetsWithoutApproximation: true,
+    },
+    probabilityRules: {
+      BASIC_EVENT: {
+        mayHaveProbability: true,
+        mayHaveFailureRate: true,
+        mayHaveFrequency: true,
+      },
+      UNDEVELOPED_EVENT: {
+        mayHaveProbability: true,
+        mayHaveQualitativeLikelihood: true,
+      },
+      HOUSE_EVENT: {
+        mustHaveBooleanState: true,
+      },
+      CONDITIONAL_EVENT: {
+        mayHaveConditionExpression: true,
+        mayHaveProbability: true,
+      },
+    },
+    labellingRules: {
+      requireUniqueNodeId: true,
+      requireEventCodeForEvents: true,
+      requireDescriptionForEvents: true,
+      preferDescriptionThenCodeThenProbability: true,
+      repeatedEventsShareEventCode: true,
+    },
+    acyclicity: {
+      enabled: true,
+      ignoreVisualTransferReferences: false,
+    },
+  },
+
+  palettes: {
+    events: [
+      "TOP_EVENT",
+      "INTERMEDIATE_EVENT",
+      "BASIC_EVENT",
+      "UNDEVELOPED_EVENT",
+      "DORMANT_EVENT",
+      "HOUSE_EVENT",
+      "CONDITIONAL_EVENT",
+    ],
+    gates: [
+      "OR_GATE",
+      "AND_GATE",
+      "EXCLUSIVE_OR_GATE",
+      "INHIBIT_GATE",
+      "MAJORITY_VOTE_GATE",
+      "PRIORITY_AND_GATE",
+      "SEQUENTIAL_GATE",
+      "SPARE_GATE",
+      "NULL_GATE",
+    ],
+    staticGates: [
+      "OR_GATE",
+      "AND_GATE",
+      "EXCLUSIVE_OR_GATE",
+      "INHIBIT_GATE",
+      "MAJORITY_VOTE_GATE",
+      "NULL_GATE",
+    ],
+    dynamicGates: [
+      "PRIORITY_AND_GATE",
+      "SEQUENTIAL_GATE",
+      "SPARE_GATE",
+    ],
+    primaryEvents: [
+      "BASIC_EVENT",
+      "UNDEVELOPED_EVENT",
+      "DORMANT_EVENT",
+      "HOUSE_EVENT",
+    ],
+    transferSymbols: [
+      "TRANSFER_IN",
+      "TRANSFER_OUT",
+    ],
   },
 };
 
-function canHaveChildren(nodeType) {
-  return IEC_61025_RULES.canHaveChildren[nodeType] || false;
+function getNodeTypeConfig(type) {
+  return IEC_61025_RULES.nodeTypes[type] || null;
 }
 
-function getAllowedChildTypes(parentType) {
+function canHaveChildren(nodeType) {
+  return getNodeTypeConfig(nodeType)?.canHaveChildren || false;
+}
+
+function getAllowedChildTypes(parentType, { relaxed = false } = {}) {
+  if (relaxed && IEC_61025_RULES.relaxedAllowedChildTypes[parentType]) {
+    return [...new Set([...(IEC_61025_RULES.allowedChildTypes[parentType] || []), ...IEC_61025_RULES.relaxedAllowedChildTypes[parentType]])];
+  }
   return IEC_61025_RULES.allowedChildTypes[parentType] || [];
 }
 
@@ -164,15 +620,44 @@ function formatRuleMessage(message) {
   return `${message} (${FTA_STANDARD_LABEL})`;
 }
 
-function validateAddChild(parentNode, childType) {
+function validateAddChild(parentNode, childType, { relaxed = false } = {}) {
   if (!canHaveChildren(parentNode.type)) {
     return { valid: false, error: formatRuleMessage(`${typeLabels[parentNode.type]} nodes cannot have children`) };
   }
+
   const allowed = getAllowedChildTypes(parentNode.type);
-  if (!allowed.includes(childType)) {
-    return { valid: false, error: formatRuleMessage(`${typeLabels[childType]} cannot be a child of ${typeLabels[parentNode.type]}`) };
+  if (allowed.includes(childType)) {
+    return { valid: true };
   }
-  return { valid: true };
+
+  if (relaxed) {
+    const relaxedAllowed = getAllowedChildTypes(parentNode.type, { relaxed: true });
+    if (relaxedAllowed.includes(childType)) {
+      return { valid: true, relaxed: true };
+    }
+  }
+
+  return { valid: false, error: formatRuleMessage(`${typeLabels[childType]} cannot be a child of ${typeLabels[parentNode.type]}`) };
+}
+
+function hasGateChild(node) {
+  return node.children.some((child) => child.type === "GATE");
+}
+
+function getMissingChildActions(node) {
+  if (["TOP_EVENT", "INTERMEDIATE_EVENT", "TRANSFER_OUT"].includes(node.type) && !hasGateChild(node)) {
+    return [{ label: "Add gate", type: "GATE", description: "This event needs a gate to connect its input events." }];
+  }
+
+  if (node.type === "GATE" && node.children.length === 0) {
+    return [
+      { label: "Add basic event", type: "BASIC_EVENT", description: "Add a terminal input event to this gate." },
+      { label: "Add intermediate event", type: "INTERMEDIATE_EVENT", description: "Add a developed event as a gate input." },
+      { label: "Add undeveloped event", type: "UNDEVELOPED_EVENT", description: "Add a placeholder event without inputs." },
+    ];
+  }
+
+  return [];
 }
 
 function uid() {
@@ -278,7 +763,7 @@ function validateNodeTypeChange(node, nextType, parentNode, isRoot) {
   return { valid: true };
 }
 
-function validateMoveNode(tree, movedId, targetParentId) {
+function validateMoveNode(tree, movedId, targetParentId, { relaxed = false } = {}) {
   const movedNode = findNode(tree, movedId);
   const targetParentNode = findNode(tree, targetParentId);
 
@@ -298,7 +783,14 @@ function validateMoveNode(tree, movedId, targetParentId) {
     return { valid: false, error: formatRuleMessage("A node cannot be moved into its own child branch") };
   }
 
-  return validateAddChild(targetParentNode, movedNode.type);
+  return validateAddChild(targetParentNode, movedNode.type, { relaxed });
+}
+
+function getNodeDropTargetIdAtPoint(clientX, clientY) {
+  if (typeof document === "undefined") return null;
+
+  const target = document.elementFromPoint(clientX, clientY);
+  return target?.closest?.(NODE_DROP_TARGET_SELECTOR)?.dataset.nodeDropId || null;
 }
 
 function collectRuleViolations(node, parentNode = null, isRoot = true, violations = []) {
@@ -396,7 +888,7 @@ function getNodeProbability(node, issues) {
 function analyzeTree(tree) {
   const countsByType = Object.fromEntries(nodeTypeOptions.map((option) => [option.value, 0]));
   const countsByGate = Object.fromEntries(gateTypeOptions.map((option) => [option.value, 0]));
-  const leafTypes = new Set(["BASIC_EVENT", "UNDEVELOPED_EVENT", "TRANSFER_EVENT", "INTERMEDIATE_EVENT"]);
+  const leafTypes = new Set(["BASIC_EVENT", "UNDEVELOPED_EVENT", "TRANSFER_IN", "TRANSFER_OUT", "INTERMEDIATE_EVENT"]);
   const issues = [];
   const ruleViolations = collectRuleViolations(tree);
   let totalNodes = 0;
@@ -531,6 +1023,7 @@ function isValidTree(tree) {
 function normalizeTree(node) {
   const normalized = {
     ...node,
+    type: node.type === "TRANSFER_EVENT" ? "TRANSFER_OUT" : node.type,
     expanded: node.expanded !== undefined ? node.expanded : true,
     children: Array.isArray(node.children) ? node.children.map(normalizeTree) : [],
   };
@@ -551,7 +1044,10 @@ function getSymbolPalette(node) {
   if (node.type === "BASIC_EVENT") return "bg-rose-100 ring-rose-200 text-rose-800";
   if (node.type === "INTERMEDIATE_EVENT") return "bg-amber-100 ring-amber-200 text-amber-800";
   if (node.type === "UNDEVELOPED_EVENT") return "bg-orange-100 ring-orange-200 text-orange-800";
-  if (node.type === "TRANSFER_EVENT") return "bg-cyan-100 ring-cyan-200 text-cyan-800";
+  if (node.type === "TRANSFER_IN" || node.type === "TRANSFER_OUT") return "bg-cyan-100 ring-cyan-200 text-cyan-800";
+  if (node.type === "DORMANT_EVENT") return "bg-rose-100 ring-rose-200 text-rose-800";
+  if (node.type === "HOUSE_EVENT") return "bg-emerald-100 ring-emerald-200 text-emerald-800";
+  if (node.type === "CONDITIONAL_EVENT") return "bg-yellow-100 ring-yellow-200 text-yellow-800";
   return "bg-slate-100 ring-slate-200 text-slate-700";
 }
 
@@ -711,6 +1207,122 @@ function AnalysisView({ tree }) {
   );
 }
 
+function SettingsView({
+  showRelaxedMode,
+  onToggleRelaxedMode,
+  darkMode,
+  onToggleDarkMode,
+  assumptionText,
+  onAssumptionTextChange,
+  modellingBoundary,
+  onModellingBoundaryChange,
+  gateAvailability,
+  onToggleGateAvailability,
+  onImport,
+  onExport,
+}) {
+  return (
+    <div className="space-y-4">
+      <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm dark:bg-slate-900 dark:border-slate-700">
+        <div className="mb-3 flex items-center gap-2">
+          <Settings className="h-4 w-4 text-slate-500" />
+          <h2 className="text-sm font-bold text-slate-950 dark:text-slate-100">Settings</h2>
+        </div>
+        <div className="grid gap-3">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Dark mode</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">Switch the app between light and dark appearance.</p>
+              </div>
+              <button
+                type="button"
+                className={`rounded-full px-3 py-1.5 text-xs font-semibold ${darkMode ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-200"}`}
+                onClick={onToggleDarkMode}
+              >
+                {darkMode ? "Enabled" : "Disabled"}
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Relaxed UI rule mode</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">Allow temporary UI shortcuts such as direct gate-to-gate connections.</p>
+              </div>
+              <button
+                type="button"
+                className={`rounded-full px-3 py-1.5 text-xs font-semibold ${showRelaxedMode ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-200"}`}
+                onClick={onToggleRelaxedMode}
+              >
+                {showRelaxedMode ? "Enabled" : "Disabled"}
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
+            <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Assumptions</p>
+            <textarea
+              className="mt-3 min-h-[120px] w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+              value={assumptionText}
+              onChange={(event) => onAssumptionTextChange(event.target.value)}
+              placeholder="Describe the assumptions for this model..."
+            />
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
+            <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Model boundaries</p>
+            <textarea
+              className="mt-3 min-h-[120px] w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+              value={modellingBoundary}
+              onChange={(event) => onModellingBoundaryChange(event.target.value)}
+              placeholder="Define the modelling boundary for this fault tree..."
+            />
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
+            <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Gate availability</p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              {Object.entries(gateAvailability).map(([category, enabled]) => (
+                <button
+                  key={category}
+                  type="button"
+                  className={`rounded-2xl border px-3 py-2 text-left text-sm font-semibold ${enabled ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"}`}
+                  onClick={() => onToggleGateAvailability(category)}
+                >
+                  {category.toLowerCase()} gates
+                </button>
+              ))}
+            </div>
+            <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">Toggle static, dynamic, and structural gate types for the gate picker.</p>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
+            <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Import / export</p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                onClick={onImport}
+              >
+                Import tree
+              </button>
+              <button
+                type="button"
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                onClick={onExport}
+              >
+                Export tree
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function TreeNode({
   node,
   rootId,
@@ -721,29 +1333,38 @@ function TreeNode({
   dragOverValid,
   onSelect,
   onToggle,
+  onAddChild,
   onDragStart,
   onDragOverNode,
   onDragLeaveNode,
   onDropNode,
   onDragEnd,
+  onPointerDragStart,
+  onPointerDragMove,
+  onPointerDragEnd,
+  onPointerDragCancel,
 }) {
   const hasChildren = node.children.length > 0;
   const selected = selectedId === node.id;
   const draggable = node.id !== rootId;
   const isDragging = draggedId === node.id;
   const isDropTarget = dragOverId === node.id && draggedId !== node.id;
+  const missingActions = getMissingChildActions(node);
   const stateClass = isDropTarget
     ? dragOverValid
       ? "border-emerald-400 ring-2 ring-emerald-100"
       : "border-red-400 ring-2 ring-red-100"
     : selected
     ? "border-indigo-400 ring-2 ring-indigo-100"
+    : missingActions.length
+    ? "border-red-300 bg-red-50"
     : "border-slate-200";
 
   return (
     <div className="relative">
       <motion.div
         layout
+        data-node-drop-id={node.id}
         onDragOver={(event) => onDragOverNode(event, node.id)}
         onDragLeave={(event) => onDragLeaveNode(event, node.id)}
         onDrop={(event) => onDropNode(event, node.id)}
@@ -779,11 +1400,17 @@ function TreeNode({
             draggable={draggable}
             onDragStart={(event) => onDragStart(event, node.id)}
             onDragEnd={onDragEnd}
+            onPointerDown={(event) => onPointerDragStart(event, node.id)}
+            onPointerMove={onPointerDragMove}
+            onPointerUp={onPointerDragEnd}
+            onPointerCancel={onPointerDragCancel}
             onClick={(event) => event.stopPropagation()}
             role="button"
             tabIndex={draggable ? 0 : -1}
             aria-label={draggable ? `Drag ${node.title || "node"}` : "Top event cannot be moved"}
+            aria-grabbed={isDragging ? "true" : undefined}
             title={draggable ? "Drag node" : "Top event cannot be moved"}
+            style={{ touchAction: draggable ? "none" : "auto" }}
           >
             <GripVertical className="h-5 w-5" />
           </div>
@@ -809,21 +1436,46 @@ function TreeNode({
                 dragOverValid={dragOverValid}
                 onSelect={onSelect}
                 onToggle={onToggle}
+                onAddChild={onAddChild}
                 onDragStart={onDragStart}
                 onDragOverNode={onDragOverNode}
                 onDragLeaveNode={onDragLeaveNode}
                 onDropNode={onDropNode}
                 onDragEnd={onDragEnd}
+                onPointerDragStart={onPointerDragStart}
+                onPointerDragMove={onPointerDragMove}
+                onPointerDragEnd={onPointerDragEnd}
+                onPointerDragCancel={onPointerDragCancel}
               />
             ))}
           </motion.div>
         )}
       </AnimatePresence>
+      {missingActions.length > 0 && (
+        <div
+          className="mb-2 rounded-2xl border border-red-300 bg-red-50 p-3 text-sm text-slate-700"
+          style={{ marginLeft: depth * 18 }}
+        >
+          <div className="mb-2 text-sm font-semibold text-slate-900">Incomplete structure</div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {missingActions.map((action) => (
+              <Button
+                key={action.type}
+                className="rounded-2xl"
+                variant="outline"
+                onClick={() => onAddChild(node.id, null, action.type)}
+              >
+                {action.label}
+              </Button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function BottomDrawer({ selected, rootId, parentNode, onClose, onSave, onAddChild, onDelete, onRuleViolation }) {
+function BottomDrawer({ selected, rootId, parentNode, gateAvailability, onClose, onSave, onAddChild, onDelete, onRuleViolation }) {
   const [draft, setDraft] = useState(selected);
   const [validationError, setValidationError] = useState("");
 
@@ -909,9 +1561,11 @@ function BottomDrawer({ selected, rootId, parentNode, onClose, onSave, onAddChil
                 disabled={!canHaveGate}
                 onChange={(e) => setDraft({ ...draft, gateType: e.target.value })}
               >
-                {gateTypeOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
+                {gateTypeOptions
+                  .filter((option) => gateAvailability[option.category])
+                  .map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
               </select>
             </label>
           </div>
@@ -994,6 +1648,15 @@ export default function FTAMobilePrototype() {
   const [tree, setTree] = useState(initialTree);
   const [activeView, setActiveView] = useState("tree");
   const [selectedId, setSelectedId] = useState(null);
+  const [showRelaxedMode, setShowRelaxedMode] = useState(false);
+  const [darkMode, setDarkMode] = useState(false);
+  const [assumptionText, setAssumptionText] = useState("");
+  const [modellingBoundary, setModellingBoundary] = useState("");
+  const [gateAvailability, setGateAvailability] = useState({
+    STATIC: true,
+    DYNAMIC: true,
+    STRUCTURAL: true,
+  });
   const [storageStatus, setStorageStatus] = useState("loading");
   const [importError, setImportError] = useState("");
   const [ruleFeedback, setRuleFeedback] = useState(null);
@@ -1002,6 +1665,7 @@ export default function FTAMobilePrototype() {
   const [dragOverValid, setDragOverValid] = useState(false);
   const [dbReady, setDbReady] = useState(false);
   const fileInputRef = useRef(null);
+  const pointerDragRef = useRef(null);
   const selected = selectedId ? findNode(tree, selectedId) : null;
   const selectedParent = selectedId ? findParentNode(tree, selectedId) : null;
   const nodeCount = useMemo(() => flattenCount(tree), [tree]);
@@ -1081,13 +1745,40 @@ export default function FTAMobilePrototype() {
     setDragOverValid(false);
   };
 
+  const startNodePointerDrag = (event, nodeId) => {
+    if (event.pointerType === "mouse") return;
+
+    if (nodeId === tree.id) {
+      event.preventDefault();
+      event.stopPropagation();
+      showRuleFeedback(formatRuleMessage("The top event cannot be moved"));
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    pointerDragRef.current = {
+      nodeId,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      hasMoved: false,
+      targetParentId: null,
+      targetValid: false,
+    };
+    setDraggedId(nodeId);
+    setDragOverId(null);
+    setDragOverValid(false);
+  };
+
   const dragOverNode = (event, nodeId) => {
     if (!draggedId) return;
 
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = "move";
-    const ruleCheck = validateMoveNode(tree, draggedId, nodeId);
+    const ruleCheck = validateMoveNode(tree, draggedId, nodeId, { relaxed: showRelaxedMode });
     setDragOverId(nodeId);
     setDragOverValid(ruleCheck.valid);
   };
@@ -1103,9 +1794,86 @@ export default function FTAMobilePrototype() {
   };
 
   const finishNodeDrag = () => {
+    pointerDragRef.current = null;
     setDraggedId(null);
     setDragOverId(null);
     setDragOverValid(false);
+  };
+
+  const updatePointerDropTarget = (event, dragSession) => {
+    const targetParentId = getNodeDropTargetIdAtPoint(event.clientX, event.clientY);
+    dragSession.targetParentId = targetParentId;
+
+    if (!targetParentId) {
+      dragSession.targetValid = false;
+      setDragOverId(null);
+      setDragOverValid(false);
+      return;
+    }
+
+    const ruleCheck = validateMoveNode(tree, dragSession.nodeId, targetParentId, { relaxed: showRelaxedMode });
+    dragSession.targetValid = ruleCheck.valid;
+    setDragOverId(targetParentId);
+    setDragOverValid(ruleCheck.valid);
+  };
+
+  const moveNodePointerDrag = (event) => {
+    const dragSession = pointerDragRef.current;
+    if (!dragSession || dragSession.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const distance = Math.hypot(event.clientX - dragSession.startX, event.clientY - dragSession.startY);
+    if (!dragSession.hasMoved && distance < 8) return;
+
+    dragSession.hasMoved = true;
+    updatePointerDropTarget(event, dragSession);
+  };
+
+  const endNodePointerDrag = (event) => {
+    const dragSession = pointerDragRef.current;
+    if (!dragSession || dragSession.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (!dragSession.hasMoved) {
+      finishNodeDrag();
+      return;
+    }
+
+    const targetParentId = getNodeDropTargetIdAtPoint(event.clientX, event.clientY) || dragSession.targetParentId;
+    if (!targetParentId) {
+      finishNodeDrag();
+      return;
+    }
+
+    const ruleCheck = validateMoveNode(tree, dragSession.nodeId, targetParentId, { relaxed: showRelaxedMode });
+    if (!ruleCheck.valid) {
+      showRuleFeedback(ruleCheck.error);
+      finishNodeDrag();
+      return;
+    }
+
+    setTree(moveNode(tree, dragSession.nodeId, targetParentId));
+    setSelectedId(dragSession.nodeId);
+    finishNodeDrag();
+  };
+
+  const cancelNodePointerDrag = (event) => {
+    const dragSession = pointerDragRef.current;
+    if (!dragSession || dragSession.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    finishNodeDrag();
   };
 
   const dropNode = (event, targetParentId) => {
@@ -1118,7 +1886,7 @@ export default function FTAMobilePrototype() {
       return;
     }
 
-    const ruleCheck = validateMoveNode(tree, movedId, targetParentId);
+    const ruleCheck = validateMoveNode(tree, movedId, targetParentId, { relaxed: showRelaxedMode });
     if (!ruleCheck.valid) {
       showRuleFeedback(ruleCheck.error);
       finishNodeDrag();
@@ -1143,7 +1911,7 @@ export default function FTAMobilePrototype() {
     return { valid: true };
   };
 
-  const addNewChild = (parentId, parentDraft = null) => {
+  const addNewChild = (parentId, parentDraft = null, explicitChildType = null) => {
     const savedParentNode = findNode(tree, parentId);
     if (!savedParentNode) return { valid: false, error: "Parent node was not found." };
     const parentNode = parentDraft || savedParentNode;
@@ -1154,15 +1922,20 @@ export default function FTAMobilePrototype() {
       return parentRuleCheck;
     }
 
-    let childType = "BASIC_EVENT";
+    let childType = explicitChildType || "BASIC_EVENT";
     let childTitle = "New basic event";
 
-    if (parentNode.type === "TOP_EVENT" || parentNode.type === "INTERMEDIATE_EVENT") {
-      childType = "GATE";
+    if (["TOP_EVENT", "INTERMEDIATE_EVENT", "TRANSFER_OUT"].includes(parentNode.type)) {
+      childType = explicitChildType || "GATE";
       childTitle = "New gate";
     }
 
-    const ruleCheck = validateAddChild(parentNode, childType);
+    if (parentNode.type === "GATE" && !explicitChildType) {
+      childType = "BASIC_EVENT";
+      childTitle = "New basic event";
+    }
+
+    const ruleCheck = validateAddChild(parentNode, childType, { relaxed: showRelaxedMode });
     if (!ruleCheck.valid) {
       showRuleFeedback(ruleCheck.error);
       return ruleCheck;
@@ -1260,9 +2033,9 @@ export default function FTAMobilePrototype() {
       : "Changes are auto-saved in browser storage.";
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_right,_rgba(79,70,229,0.16),_transparent_34%),linear-gradient(180deg,#f8fbff_0%,#eef2ff_100%)] text-slate-950">
+    <div className={`${darkMode ? "dark" : ""} min-h-screen bg-[radial-gradient(circle_at_top_right,_rgba(79,70,229,0.16),_transparent_34%),linear-gradient(180deg,#f8fbff_0%,#eef2ff_100%)] text-slate-950 dark:bg-slate-950 dark:text-slate-100`}>
       <div className="mx-auto flex min-h-screen w-screen flex-col">
-        <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 px-4 py-2 backdrop-blur">
+        <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 px-4 py-2 backdrop-blur dark:border-slate-700 dark:bg-slate-900">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <p className="truncate text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">Fault Tree Analysis</p>
@@ -1283,6 +2056,13 @@ export default function FTAMobilePrototype() {
               >
                 <BarChart3 className="h-3.5 w-3.5" />
               </button>
+              <button
+                className={`flex h-7 items-center justify-center gap-1 rounded text-xs font-semibold transition ${activeView === "settings" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}
+                onClick={() => setActiveView("settings")}
+                type="button"
+              >
+                <Settings className="h-3.5 w-3.5" />
+              </button>
             </div>
           </div>
           {importError && <p className="text-xs text-red-600">{importError}</p>}
@@ -1302,14 +2082,37 @@ export default function FTAMobilePrototype() {
               dragOverValid={dragOverValid}
               onSelect={setSelectedId}
               onToggle={toggleNode}
+              onAddChild={addNewChild}
+              gateAvailability={gateAvailability}
               onDragStart={startNodeDrag}
               onDragOverNode={dragOverNode}
               onDragLeaveNode={leaveDraggedNode}
               onDropNode={dropNode}
               onDragEnd={finishNodeDrag}
+              onPointerDragStart={startNodePointerDrag}
+              onPointerDragMove={moveNodePointerDrag}
+              onPointerDragEnd={endNodePointerDrag}
+              onPointerDragCancel={cancelNodePointerDrag}
             />
-          ) : (
+          ) : activeView === "analysis" ? (
             <AnalysisView tree={tree} />
+          ) : (
+            <SettingsView
+              showRelaxedMode={showRelaxedMode}
+              onToggleRelaxedMode={() => setShowRelaxedMode((value) => !value)}
+              darkMode={darkMode}
+              onToggleDarkMode={() => setDarkMode((value) => !value)}
+              assumptionText={assumptionText}
+              onAssumptionTextChange={setAssumptionText}
+              modellingBoundary={modellingBoundary}
+              onModellingBoundaryChange={setModellingBoundary}
+              gateAvailability={gateAvailability}
+              onToggleGateAvailability={(category) =>
+                setGateAvailability((prev) => ({ ...prev, [category]: !prev[category] }))
+              }
+              onImport={importJson}
+              onExport={exportJson}
+            />
           )}
         </main>
 
@@ -1359,6 +2162,7 @@ export default function FTAMobilePrototype() {
           selected={selected}
           rootId={tree.id}
           parentNode={selectedParent}
+          gateAvailability={gateAvailability}
           onClose={() => setSelectedId(null)}
           onSave={saveNode}
           onAddChild={addNewChild}
