@@ -2,9 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertTriangle,
-  ArrowRight,
   BarChart3,
-  Circle,
   ChevronDown,
   ChevronRight,
   Plus,
@@ -13,12 +11,19 @@ import {
   Save,
   GitBranch,
   GripVertical,
-  ShieldAlert,
   Upload,
   Download,
   GitFork,
 } from "lucide-react";
 import { Button } from "./components/ui/button";
+import andGateSymbol from "./assets/symbols/and-gate.svg";
+import basicEventSymbol from "./assets/symbols/basic-event.svg";
+import exclusiveOrGateSymbol from "./assets/symbols/exclusive-or-gate.svg";
+import inhibitGateSymbol from "./assets/symbols/inhibit-gate.svg";
+import intermediateEventSymbol from "./assets/symbols/intermediate-event.svg";
+import orGateSymbol from "./assets/symbols/or-gate.svg";
+import transferOutSymbol from "./assets/symbols/transfer-out.svg";
+import undevelopedEventSymbol from "./assets/symbols/undeveloped-event.svg";
 
 const initialTree = {
   id: "top",
@@ -112,6 +117,21 @@ const gateTypeLabels = {
   INHIBIT: "Inhibit",
   K_OUT_OF_N: "K/N",
   XOR: "Exclusive OR",
+};
+
+const symbolByNodeType = {
+  TOP_EVENT: intermediateEventSymbol,
+  INTERMEDIATE_EVENT: intermediateEventSymbol,
+  BASIC_EVENT: basicEventSymbol,
+  UNDEVELOPED_EVENT: undevelopedEventSymbol,
+  TRANSFER_EVENT: transferOutSymbol,
+};
+
+const symbolByGateType = {
+  AND: andGateSymbol,
+  OR: orGateSymbol,
+  INHIBIT: inhibitGateSymbol,
+  XOR: exclusiveOrGateSymbol,
 };
 
 const DRAG_NODE_MIME_TYPE = "application/x-minifta-node";
@@ -525,24 +545,41 @@ function normalizeTree(node) {
   return normalized;
 }
 
+function getSymbolPalette(node) {
+  if (node.type === "TOP_EVENT") return "bg-violet-100 ring-violet-200 text-violet-800";
+  if (node.type === "GATE") return "bg-sky-100 ring-sky-200 text-sky-800";
+  if (node.type === "BASIC_EVENT") return "bg-rose-100 ring-rose-200 text-rose-800";
+  if (node.type === "INTERMEDIATE_EVENT") return "bg-amber-100 ring-amber-200 text-amber-800";
+  if (node.type === "UNDEVELOPED_EVENT") return "bg-orange-100 ring-orange-200 text-orange-800";
+  if (node.type === "TRANSFER_EVENT") return "bg-cyan-100 ring-cyan-200 text-cyan-800";
+  return "bg-slate-100 ring-slate-200 text-slate-700";
+}
+
 function GateBadge({ node }) {
-  const common = "h-8 w-8 shrink-0 rounded-xl flex items-center justify-center text-xs font-bold shadow-sm";
-  if (node.type === "TOP_EVENT") {
-    return <div className={`${common} bg-red-100 text-red-700`}><ShieldAlert className="h-4 w-4" /></div>;
-  }
-  if (node.type === "GATE") {
-    return <div className={`${common} bg-indigo-100 text-indigo-700`}>{node.gateType}</div>;
-  }
-  if (node.type === "INTERMEDIATE_EVENT") {
-    return <div className={`${common} bg-teal-100 text-teal-700`}>IE</div>;
-  }
-  if (node.type === "UNDEVELOPED_EVENT") {
-    return <div className={`${common} bg-amber-100 text-amber-700`}><AlertTriangle className="h-4 w-4" /></div>;
-  }
-  if (node.type === "TRANSFER_EVENT") {
-    return <div className={`${common} bg-sky-100 text-sky-700`}><ArrowRight className="h-4 w-4" /></div>;
-  }
-  return <div className={`${common} bg-slate-100 text-slate-700`}><Circle className="h-4 w-4" /></div>;
+  const symbol = node.type === "GATE" ? symbolByGateType[node.gateType] : symbolByNodeType[node.type];
+  const label = node.type === "GATE" ? gateTypeLabels[node.gateType] || node.gateType : typeLabels[node.type] || node.type;
+  const palette = getSymbolPalette(node);
+
+  return (
+    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl shadow-sm ring-1 ${palette}`} title={label}>
+      {symbol ? (
+        <img className="h-6 w-6" src={symbol} alt="" draggable={false} aria-hidden="true" />
+      ) : (
+        <span className="text-[10px] font-bold">{node.gateType || node.type}</span>
+      )}
+    </div>
+  );
+}
+
+function NodeMeta({ node }) {
+  const typeText = node.type === "GATE"
+    ? `${gateTypeLabels[node.gateType] || node.gateType} gate`
+    : typeLabels[node.type] || node.type;
+  return (
+    <p className="truncate text-xs text-slate-500">
+      {typeText}{node.probability ? ` · P=${node.probability}` : ""}
+    </p>
+  );
 }
 
 function RuleFeedback({ feedback, onDismiss }) {
@@ -734,9 +771,7 @@ function TreeNode({
               <div className="flex items-center gap-2">
                 <p className="truncate text-sm font-semibold text-slate-900">{node.title || "Untitled node"}</p>
               </div>
-              <p className="truncate text-xs text-slate-500">
-                {typeLabels[node.type] || node.type}{node.type === "GATE" ? ` · ${gateTypeLabels[node.gateType] || node.gateType} gate` : ""}{node.probability ? ` · P=${node.probability}` : ""}
-              </p>
+              <NodeMeta node={node} />
             </div>
           </button>
           <div
@@ -1233,27 +1268,27 @@ export default function FTAMobilePrototype() {
               <p className="truncate text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">Fault Tree Analysis</p>
               <p className="truncate text-xs text-slate-500">{statusLabel} · {nodeCount} nodes</p>
             </div>
-            <div className="grid w-36 shrink-0 grid-cols-2 rounded-md bg-slate-100 p-0.5">
+            <div className="grid w-24 shrink-0 grid-cols-2 rounded-md bg-slate-100 p-0.5">
               <button
                 className={`flex h-7 items-center justify-center gap-1 rounded text-xs font-semibold transition ${activeView === "tree" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}
                 onClick={() => setActiveView("tree")}
                 type="button"
               >
-                <GitBranch className="h-3.5 w-3.5" /> Tree
+                <GitBranch className="h-3.5 w-3.5" />
               </button>
               <button
                 className={`flex h-7 items-center justify-center gap-1 rounded text-xs font-semibold transition ${activeView === "analysis" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}
                 onClick={() => setActiveView("analysis")}
                 type="button"
               >
-                <BarChart3 className="h-3.5 w-3.5" /> Analysis
+                <BarChart3 className="h-3.5 w-3.5" />
               </button>
             </div>
           </div>
           {importError && <p className="text-xs text-red-600">{importError}</p>}
         </header>
         <RuleFeedback feedback={ruleFeedback} onDismiss={() => setRuleFeedback(null)} />
-        <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pb-24 pt-6">
+        <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pb-2 pt-0">
 
         <main className="flex-1 space-y-4 px-0 py-4">
           {activeView === "tree" ? (
