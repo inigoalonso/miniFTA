@@ -115,6 +115,7 @@ const gateTypeOptions = [
   { value: "SPARE", label: "Spare", category: "DYNAMIC" },
   { value: "NULL", label: "Null", category: "STRUCTURAL" },
 ];
+const defaultGateAvailability = Object.fromEntries(gateTypeOptions.map((option) => [option.value, true]));
 
 const FTA_STANDARD_LABEL = "EIA 61025:2017";
 const TREE_HISTORY_LIMIT = 80;
@@ -280,19 +281,6 @@ const IEC_61025_RULES = {
     HOUSE_EVENT: [],
     CONDITIONAL_EVENT: [],
     TRANSFER_IN: [],
-  },
-
-  relaxedAllowedChildTypes: {
-    GATE: [
-      "GATE",
-      "INTERMEDIATE_EVENT",
-      "BASIC_EVENT",
-      "UNDEVELOPED_EVENT",
-      "DORMANT_EVENT",
-      "HOUSE_EVENT",
-      "CONDITIONAL_EVENT",
-      "TRANSFER_IN",
-    ],
   },
 
   gateTypes: {
@@ -631,10 +619,7 @@ function canHaveChildren(nodeType) {
   return getNodeTypeConfig(nodeType)?.canHaveChildren || false;
 }
 
-function getAllowedChildTypes(parentType, { relaxed = false } = {}) {
-  if (relaxed && IEC_61025_RULES.relaxedAllowedChildTypes[parentType]) {
-    return [...new Set([...(IEC_61025_RULES.allowedChildTypes[parentType] || []), ...IEC_61025_RULES.relaxedAllowedChildTypes[parentType]])];
-  }
+function getAllowedChildTypes(parentType) {
   return IEC_61025_RULES.allowedChildTypes[parentType] || [];
 }
 
@@ -642,7 +627,7 @@ function formatRuleMessage(message) {
   return `${message} (${FTA_STANDARD_LABEL})`;
 }
 
-function validateAddChild(parentNode, childType, { relaxed = false } = {}) {
+function validateAddChild(parentNode, childType) {
   if (!canHaveChildren(parentNode.type)) {
     return { valid: false, error: formatRuleMessage(`${typeLabels[parentNode.type]} nodes cannot have children`) };
   }
@@ -650,13 +635,6 @@ function validateAddChild(parentNode, childType, { relaxed = false } = {}) {
   const allowed = getAllowedChildTypes(parentNode.type);
   if (allowed.includes(childType)) {
     return { valid: true };
-  }
-
-  if (relaxed) {
-    const relaxedAllowed = getAllowedChildTypes(parentNode.type, { relaxed: true });
-    if (relaxedAllowed.includes(childType)) {
-      return { valid: true, relaxed: true };
-    }
   }
 
   return { valid: false, error: formatRuleMessage(`${typeLabels[childType]} cannot be a child of ${typeLabels[parentNode.type]}`) };
@@ -817,7 +795,7 @@ function validateNodeTypeChange(node, nextType, parentNode, isRoot) {
   return { valid: true };
 }
 
-function validateMoveNode(tree, movedId, targetParentId, { relaxed = false } = {}) {
+function validateMoveNode(tree, movedId, targetParentId) {
   const movedNode = findNode(tree, movedId);
   const targetParentNode = findNode(tree, targetParentId);
 
@@ -837,7 +815,7 @@ function validateMoveNode(tree, movedId, targetParentId, { relaxed = false } = {
     return { valid: false, error: formatRuleMessage("A node cannot be moved into its own child branch") };
   }
 
-  return validateAddChild(targetParentNode, movedNode.type, { relaxed });
+  return validateAddChild(targetParentNode, movedNode.type);
 }
 
 function getNodeDropTargetIdAtPoint(clientX, clientY) {
@@ -1692,8 +1670,6 @@ function AnalysisView({ tree }) {
 }
 
 function SettingsView({
-  showRelaxedMode,
-  onToggleRelaxedMode,
   darkMode,
   onToggleDarkMode,
   assumptionText,
@@ -1730,22 +1706,6 @@ function SettingsView({
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Relaxed UI rule mode</p>
-                <p className="text-xs text-slate-500 dark:text-slate-400">Allow temporary UI shortcuts such as direct gate-to-gate connections.</p>
-              </div>
-              <button
-                type="button"
-                className={`rounded-full px-3 py-1.5 text-xs font-semibold ${showRelaxedMode ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-200"}`}
-                onClick={onToggleRelaxedMode}
-              >
-                {showRelaxedMode ? "Enabled" : "Disabled"}
-              </button>
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
             <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Assumptions</p>
             <textarea
               className="mt-3 min-h-[120px] w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
@@ -1767,19 +1727,26 @@ function SettingsView({
 
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
             <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Gate availability</p>
-            <div className="mt-3 grid gap-2 sm:grid-cols-3">
-              {Object.entries(gateAvailability).map(([category, enabled]) => (
-                <button
-                  key={category}
-                  type="button"
-                  className={`rounded-2xl border px-3 py-2 text-left text-sm font-semibold ${enabled ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"}`}
-                  onClick={() => onToggleGateAvailability(category)}
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {gateTypeOptions.map((option) => (
+                <label
+                  key={option.value}
+                  className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
                 >
-                  {category.toLowerCase()} gates
-                </button>
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-slate-900"
+                    checked={Boolean(gateAvailability[option.value])}
+                    onChange={() => onToggleGateAvailability(option.value)}
+                  />
+                  <span className="min-w-0 flex-1">{option.label}</span>
+                  <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                    {option.category.toLowerCase()}
+                  </span>
+                </label>
               ))}
             </div>
-            <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">Toggle static, dynamic, and structural gate types for the gate picker.</p>
+            <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">Choose which individual gate types appear in the gate picker.</p>
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
@@ -2021,6 +1988,7 @@ function BottomDrawer({ selected, rootId, parentNode, gateAvailability, onClose,
 
   const canHaveGate = draft.type === "GATE";
   const canAddChildren = canHaveChildren(draft.type);
+  const availableGateTypeOptions = gateTypeOptions.filter((option) => gateAvailability[option.value]);
 
   return (
     <AnimatePresence>
@@ -2078,7 +2046,9 @@ function BottomDrawer({ selected, rootId, parentNode, gateAvailability, onClose,
                   
                   setValidationError("");
                   if (type === "GATE") {
-                    nextDraft.gateType = draft.gateType || "AND";
+                    nextDraft.gateType = availableGateTypeOptions.some((option) => option.value === draft.gateType)
+                      ? draft.gateType
+                      : availableGateTypeOptions[0]?.value || "AND";
                   } else {
                     delete nextDraft.gateType;
                   }
@@ -2095,15 +2065,13 @@ function BottomDrawer({ selected, rootId, parentNode, gateAvailability, onClose,
               Gate type
               <select
                 className="rounded-xl border border-slate-200 px-3 py-2 text-base outline-none disabled:bg-slate-50 disabled:text-slate-400"
-                value={draft.gateType || ""}
-                disabled={!canHaveGate}
+                value={availableGateTypeOptions.some((option) => option.value === draft.gateType) ? draft.gateType : ""}
+                disabled={!canHaveGate || availableGateTypeOptions.length === 0}
                 onChange={(e) => setDraft({ ...draft, gateType: e.target.value })}
               >
-                {gateTypeOptions
-                  .filter((option) => gateAvailability[option.category])
-                  .map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                  ))}
+                {availableGateTypeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
               </select>
             </label>
           </div>
@@ -2186,15 +2154,10 @@ export default function FTAMobilePrototype() {
   const [tree, setTree] = useState(initialTree);
   const [activeView, setActiveView] = useState("tree");
   const [selectedId, setSelectedId] = useState(null);
-  const [showRelaxedMode, setShowRelaxedMode] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [assumptionText, setAssumptionText] = useState("");
   const [modellingBoundary, setModellingBoundary] = useState("");
-  const [gateAvailability, setGateAvailability] = useState({
-    STATIC: true,
-    DYNAMIC: true,
-    STRUCTURAL: true,
-  });
+  const [gateAvailability, setGateAvailability] = useState(defaultGateAvailability);
   const [storageStatus, setStorageStatus] = useState("loading");
   const [importError, setImportError] = useState("");
   const [ruleFeedback, setRuleFeedback] = useState(null);
@@ -2380,7 +2343,7 @@ export default function FTAMobilePrototype() {
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = "move";
-    const ruleCheck = validateMoveNode(tree, draggedId, nodeId, { relaxed: showRelaxedMode });
+    const ruleCheck = validateMoveNode(tree, draggedId, nodeId);
     setDragOverId(nodeId);
     setDragOverValid(ruleCheck.valid);
   };
@@ -2413,7 +2376,7 @@ export default function FTAMobilePrototype() {
       return;
     }
 
-    const ruleCheck = validateMoveNode(tree, dragSession.nodeId, targetParentId, { relaxed: showRelaxedMode });
+    const ruleCheck = validateMoveNode(tree, dragSession.nodeId, targetParentId);
     dragSession.targetValid = ruleCheck.valid;
     setDragOverId(targetParentId);
     setDragOverValid(ruleCheck.valid);
@@ -2454,7 +2417,7 @@ export default function FTAMobilePrototype() {
       return;
     }
 
-    const ruleCheck = validateMoveNode(tree, dragSession.nodeId, targetParentId, { relaxed: showRelaxedMode });
+    const ruleCheck = validateMoveNode(tree, dragSession.nodeId, targetParentId);
     if (!ruleCheck.valid) {
       showRuleFeedback(ruleCheck.error);
       finishNodeDrag();
@@ -2487,7 +2450,7 @@ export default function FTAMobilePrototype() {
       return;
     }
 
-    const ruleCheck = validateMoveNode(tree, movedId, targetParentId, { relaxed: showRelaxedMode });
+    const ruleCheck = validateMoveNode(tree, movedId, targetParentId);
     if (!ruleCheck.valid) {
       showRuleFeedback(ruleCheck.error);
       finishNodeDrag();
@@ -2535,7 +2498,7 @@ export default function FTAMobilePrototype() {
       childTitle = "New basic event";
     }
 
-    const ruleCheck = validateAddChild(parentNode, childType, { relaxed: showRelaxedMode });
+    const ruleCheck = validateAddChild(parentNode, childType);
     if (!ruleCheck.valid) {
       showRuleFeedback(ruleCheck.error);
       return ruleCheck;
@@ -2638,7 +2601,7 @@ export default function FTAMobilePrototype() {
               <p className="truncate text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">Fault Tree Analysis</p>
               <p className="truncate text-xs text-slate-500">{statusLabel} · {nodeCount} nodes</p>
             </div>
-            <div className="grid w-24 shrink-0 grid-cols-2 rounded-md bg-slate-100 p-0.5">
+            <div className="grid w-32 shrink-0 grid-cols-3 rounded-md bg-slate-100 p-0.5">
               <button
                 className={`flex h-7 items-center justify-center gap-1 rounded text-xs font-semibold transition ${activeView === "tree" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}
                 onClick={() => setActiveView("tree")}
@@ -2695,8 +2658,6 @@ export default function FTAMobilePrototype() {
             <AnalysisView tree={tree} />
           ) : (
             <SettingsView
-              showRelaxedMode={showRelaxedMode}
-              onToggleRelaxedMode={() => setShowRelaxedMode((value) => !value)}
               darkMode={darkMode}
               onToggleDarkMode={() => setDarkMode((value) => !value)}
               assumptionText={assumptionText}
@@ -2704,8 +2665,12 @@ export default function FTAMobilePrototype() {
               modellingBoundary={modellingBoundary}
               onModellingBoundaryChange={setModellingBoundary}
               gateAvailability={gateAvailability}
-              onToggleGateAvailability={(category) =>
-                setGateAvailability((prev) => ({ ...prev, [category]: !prev[category] }))
+              onToggleGateAvailability={(gateType) =>
+                setGateAvailability((prev) => {
+                  const enabledCount = Object.values(prev).filter(Boolean).length;
+                  if (prev[gateType] && enabledCount === 1) return prev;
+                  return { ...prev, [gateType]: !prev[gateType] };
+                })
               }
               onImport={importJson}
               onExport={exportJson}

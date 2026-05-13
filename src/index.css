@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
   --bg: #f8fafc;
@@ -81,13 +82,66 @@ a,span {
   background: rgba(79, 70, 229, 0.18);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #d1d5db;
-    --text-h: #f8fafc;
-    --bg: #0f172a;
-    --border: #334155;
-    --accent: #818cf8;
-    --accent-soft: rgba(129, 140, 248, 0.18);
-  }
+.dark {
+  --text: #d1d5db;
+  --text-h: #f8fafc;
+  --bg: #020617;
+  --border: #334155;
+  --accent: #818cf8;
+  --accent-soft: rgba(129, 140, 248, 0.18);
+
+  color-scheme: dark;
+  background: linear-gradient(180deg, #020617 0%, #0f172a 100%);
+}
+
+.dark :where(.bg-white, [class~="bg-white/95"]) {
+  background-color: rgb(15 23 42 / 0.96);
+}
+
+.dark :where(.bg-slate-50, .bg-slate-100, .bg-slate-200) {
+  background-color: rgb(30 41 59);
+}
+
+.dark :where(.border-slate-200, .border-slate-300) {
+  border-color: rgb(51 65 85);
+}
+
+.dark :where(.text-slate-950, .text-slate-900) {
+  color: rgb(241 245 249);
+}
+
+.dark .text-slate-700 {
+  color: rgb(203 213 225);
+}
+
+.dark :where(.text-slate-500, .text-slate-400) {
+  color: rgb(148 163 184);
+}
+
+.dark :where(.hover\:bg-slate-50:hover, .hover\:bg-slate-100:hover) {
+  background-color: rgb(51 65 85);
+}
+
+.dark .hover\:text-slate-900:hover {
+  color: rgb(248 250 252);
+}
+
+.dark .bg-red-50 {
+  background-color: rgb(69 10 10);
+}
+
+.dark :where(.border-red-200, .border-red-300) {
+  border-color: rgb(127 29 29);
+}
+
+.dark :where(.text-red-900, .text-red-950, .text-red-800, .text-red-700) {
+  color: rgb(254 202 202);
+}
+
+.dark .bg-emerald-100 {
+  background-color: rgb(6 78 59);
+}
+
+.dark .text-emerald-800 {
+  color: rgb(167 243 208);
 }
